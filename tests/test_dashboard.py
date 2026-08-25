@@ -2,7 +2,14 @@ import json
 
 import pandas as pd
 
-from actblue_refunds.dashboard import write_dashboard
+from actblue_refunds.dashboard import _form_category, write_dashboard
+
+
+def test_form_category_prefers_rtext_over_text():
+    assert _form_category("https://secure.actblue.com/page/chevalier-rtext") == "rtext"
+    assert _form_category("https://secure.actblue.com/page/chevalier-text") == "text"
+    assert _form_category("dcrowley-email") == "email"
+    assert _form_category("some-page-ads") == "ads"
 
 
 def _extract_payload(html):
@@ -55,10 +62,11 @@ def test_write_dashboard_embeds_summary_and_table_data(tmp_path):
     assert payload["table"]["totalRows"] == 3
     assert payload["table"]["truncated"] is False
 
-    # Form shows just the page slug, not the full URL.
+    # Form shows just the category (rtext/text/email/ads), not the full slug or URL.
     assert "Form" in payload["table"]["columns"]
     form_idx = payload["table"]["columns"].index("Form")
-    assert payload["table"]["rows"][0][form_idx] == "campaign-a-rtext"
+    assert payload["table"]["rows"][0][form_idx] == "rtext"
+    assert payload["table"]["rows"][2][form_idx] == "email"
 
     # Refcode must resolve to "Reference Code", not "Reference Code 2".
     assert "Refcode" in payload["table"]["columns"]
@@ -89,6 +97,11 @@ def test_write_dashboard_excludes_refunds_from_untracked_forms(tmp_path):
     assert payload["totals"]["count"] == 3
     assert payload["totals"]["refunded"] == 35.0
     assert payload["excludedForms"] == {"count": 1, "total": 100.0}
+
+    # Surviving rows show just the category, e.g. "rtext" not "campaign-a-rtext".
+    form_idx = payload["table"]["columns"].index("Form")
+    forms = [row[form_idx] for row in payload["table"]["rows"]]
+    assert forms == ["rtext", "email", "ads"]
 
 
 def test_write_dashboard_without_amount_column_still_writes_table(tmp_path):

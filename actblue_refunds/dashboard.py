@@ -21,6 +21,11 @@ _MAX_TABLE_ROWS = 5000
 # from the filter dropdown.
 _ALLOWED_FORM_SUFFIXES = ("text", "email", "ads")
 
+# Same categories, but checked most-specific-first so "rtext" doesn't get
+# swallowed by the "text" suffix - used to reduce a form slug down to just
+# its category for display (e.g. "chevalier-rtext" -> "rtext").
+_FORM_CATEGORIES = ("rtext", "text", "email", "ads")
+
 # Categorical palette, fixed order (never cycled within 8 slots) - see the
 # dataviz skill's references/palette.md for how this was validated.
 _PALETTE_LIGHT = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"]
@@ -83,6 +88,14 @@ def _matches_allowed_form(value):
     return _form_slug(value).lower().endswith(_ALLOWED_FORM_SUFFIXES)
 
 
+def _form_category(value):
+    slug = _form_slug(value).lower()
+    for category in _FORM_CATEGORIES:
+        if slug.endswith(category):
+            return category
+    return slug
+
+
 def _cell_value(value, numeric=False, form=False):
     if pd.isna(value):
         return None
@@ -91,7 +104,7 @@ def _cell_value(value, numeric=False, form=False):
             return float(value)
         except (TypeError, ValueError):
             return None
-    value = _form_slug(value) if form else str(value)
+    value = _form_category(value) if form else str(value)
     return value
 
 
