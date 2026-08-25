@@ -91,6 +91,12 @@ def test_write_dashboard_embeds_summary_and_table_data(tmp_path):
     refcode_idx = payload["table"]["columns"].index("Refcode")
     assert payload["table"]["rows"][0][refcode_idx] == "fb_ad1"
 
+    # Refunds by form: two rtext refunds ($10 + $5) and one email ($20).
+    by_form = {row["category"]: row for row in payload["byForm"]}
+    assert by_form["rtext"] == {"category": "rtext", "count": 2, "total": 15.0}
+    assert by_form["email"] == {"category": "email", "count": 1, "total": 20.0}
+    assert payload["formColors"]["rtext"]["light"] != payload["formColors"]["email"]["light"]
+
 
 def test_write_dashboard_excludes_refunds_from_untracked_forms(tmp_path):
     df = pd.DataFrame(

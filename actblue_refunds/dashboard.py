@@ -129,9 +129,14 @@ def write_dashboard(df, out_path, start=None, end=None):
         }
         for i, account in enumerate(accounts)
     }
+    form_colors = {
+        category: {"light": _PALETTE_LIGHT[i], "dark": _PALETTE_DARK[i]}
+        for i, category in enumerate(_FORM_CATEGORIES)
+    }
 
     by_account_records = []
     by_month_records = []
+    by_form_records = []
     total_refunded = None
     if amount_col is not None:
         by_account = summarize_by_account(df, amount_col)
@@ -146,6 +151,18 @@ def write_dashboard(df, out_path, start=None, end=None):
             by_month_records = [
                 {"month": month, "account": account, "count": int(row.refund_count), "total": float(row.total_refunded)}
                 for (month, account), row in by_month.iterrows()
+            ]
+
+        if form_col is not None:
+            by_form = (
+                df.assign(_form_category=df[form_col].apply(_form_category))
+                .groupby("_form_category")[amount_col]
+                .agg(["count", "sum"])
+            )
+            by_form_records = [
+                {"category": category, "count": int(by_form.loc[category, "count"]), "total": float(by_form.loc[category, "sum"])}
+                for category in _FORM_CATEGORIES
+                if category in by_form.index
             ]
 
     table_columns = _pick_table_columns(df, amount_col)
@@ -171,6 +188,8 @@ def write_dashboard(df, out_path, start=None, end=None):
         "excludedForms": excluded,
         "byAccount": by_account_records,
         "byMonth": by_month_records,
+        "byForm": by_form_records,
+        "formColors": form_colors,
         "table": {
             "columns": [label for label, _ in table_columns],
             "rows": table_rows,
@@ -236,8 +255,11 @@ _TEMPLATE = """<!doctype html>
   .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; margin-bottom: 20px; }
   .stat-label { font-size: 13px; color: var(--text-secondary); margin: 0 0 6px; }
   .stat-value { font-size: 28px; font-weight: 600; }
-  .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 20px; }
-  @media (max-width: 860px) { .charts { grid-template-columns: 1fr; } }
+  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin-bottom: 20px; }
+  .donut-wrap { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+  .donut-wrap .legend { flex-direction: column; gap: 8px; margin: 0; }
+  .donut-center-value { font-size: 15px; font-weight: 600; fill: var(--text-primary); }
+  .donut-center-label { font-size: 10px; fill: var(--text-muted); }
   .chart-title { font-size: 14px; font-weight: 600; margin: 0 0 4px; }
   .chart-note { font-size: 12px; color: var(--text-muted); margin: 0 0 16px; }
   .bar-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
@@ -307,6 +329,14 @@ _TEMPLATE = """<!doctype html>
       <p class="chart-note">Stacked by client</p>
       <div id="byMonthChart"></div>
       <div class="legend" id="byMonthLegend"></div>
+    </div>
+    <div class="card">
+      <p class="chart-title">Refunds by form</p>
+      <p class="chart-note" id="byFormNote"></p>
+      <div class="donut-wrap">
+        <div id="byFormChart"></div>
+        <div class="legend" id="byFormLegend"></div>
+      </div>
     </div>
   </div>
 
@@ -460,6 +490,95 @@ function renderByMonthChart() {
   }
 }
 
+function polarToCartesian(cx, cy, r, angleDeg) {
+  const rad = angleDeg * Math.PI / 180;
+  return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
+}
+
+function donutSlicePath(cx, cy, rOuter, rInner, startDeg, endDeg) {
+  const startOuter = polarToCartesian(cx, cy, rOuter, startDeg);
+  const endOuter = polarToCartesian(cx, cy, rOuter, endDeg);
+  const startInner = polarToCartesian(cx, cy, rInner, endDeg);
+  const endInner = polarToCartesian(cx, cy, rInner, startDeg);
+  const largeArc = (endDeg - startDeg) > 180 ? 1 : 0;
+  return [
+    `M ${startOuter.x} ${startOuter.y}`,
+    `A ${rOuter} ${rOuter} 0 ${largeArc} 1 ${endOuter.x} ${endOuter.y}`,
+    `L ${startInner.x} ${startInner.y}`,
+    `A ${rInner} ${rInner} 0 ${largeArc} 0 ${endInner.x} ${endInner.y}`,
+    "Z",
+  ].join(" ");
+}
+
+function renderByFormChart() {
+  const el = document.getElementById("byFormChart");
+  const note = document.getElementById("byFormNote");
+  const legendEl = document.getElementById("byFormLegend");
+  if (!DATA.byForm.length) {
+    note.textContent = "No form breakdown available.";
+    el.innerHTML = "";
+    legendEl.innerHTML = "";
+    return;
+  }
+  note.textContent = "";
+  const mode = dark() ? "dark" : "light";
+  const total = DATA.byForm.reduce((s, r) => s + r.total, 0);
+  const size = 200, cx = size / 2, cy = size / 2, rOuter = 90, rInner = 55;
+  const gapDeg = total > 0 ? 1.5 : 0;
+  let angle = -90;
+
+  const svgNS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(svgNS, "svg");
+  svg.setAttribute("viewBox", `0 0 ${size} ${size}`);
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+
+  DATA.byForm.forEach(r => {
+    const frac = total > 0 ? r.total / total : 0;
+    const sweep = frac * 360;
+    const startA = angle + gapDeg / 2;
+    const endA = angle + Math.max(sweep - gapDeg, 0);
+    angle += sweep;
+    const path = document.createElementNS(svgNS, "path");
+    path.setAttribute("d", donutSlicePath(cx, cy, rOuter, rInner, startA, endA));
+    path.setAttribute("fill", DATA.formColors[r.category][mode]);
+    const pct = total > 0 ? Math.round((r.total / total) * 100) : 0;
+    path.addEventListener("mousemove", evt => {
+      showTooltip(evt, `${r.category}: ${fmtMoney(r.total)} (${pct}%, ${r.count} refund${r.count === 1 ? "" : "s"})`);
+    });
+    path.addEventListener("mouseleave", hideTooltip);
+    svg.appendChild(path);
+  });
+
+  const centerValue = document.createElementNS(svgNS, "text");
+  centerValue.setAttribute("x", cx);
+  centerValue.setAttribute("y", cy - 4);
+  centerValue.setAttribute("text-anchor", "middle");
+  centerValue.setAttribute("class", "donut-center-value");
+  centerValue.textContent = fmtMoney(total);
+  svg.appendChild(centerValue);
+
+  const centerLabel = document.createElementNS(svgNS, "text");
+  centerLabel.setAttribute("x", cx);
+  centerLabel.setAttribute("y", cy + 14);
+  centerLabel.setAttribute("text-anchor", "middle");
+  centerLabel.setAttribute("class", "donut-center-label");
+  centerLabel.textContent = "total";
+  svg.appendChild(centerLabel);
+
+  el.innerHTML = "";
+  el.appendChild(svg);
+
+  legendEl.innerHTML = DATA.byForm.map(r => {
+    const pct = total > 0 ? Math.round((r.total / total) * 100) : 0;
+    return `
+      <div class="legend-item">
+        <span class="legend-swatch" style="background:${DATA.formColors[r.category][mode]}"></span>${r.category} — ${fmtMoney(r.total)} (${pct}%)
+      </div>
+    `;
+  }).join("");
+}
+
 function renderTable() {
   const note = document.getElementById("tableNote");
   const t = DATA.table;
@@ -550,12 +669,14 @@ function renderAll() {
   renderStats();
   renderByAccountChart();
   renderByMonthChart();
+  renderByFormChart();
 }
 renderAll();
 renderTable();
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
   renderByAccountChart();
   renderByMonthChart();
+  renderByFormChart();
 });
 </script>
 </body>
