@@ -540,6 +540,7 @@ function renderTable() {
   });
   document.getElementById("search").addEventListener("input", applyFilters);
   clientFilter.addEventListener("change", applyFilters);
+  if (formIdx >= 0) formFilter.addEventListener("change", applyFilters);
 
   renderRows();
 }

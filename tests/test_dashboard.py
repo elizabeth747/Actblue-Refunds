@@ -12,6 +12,24 @@ def test_form_category_prefers_rtext_over_text():
     assert _form_category("some-page-ads") == "ads"
 
 
+def test_form_filter_dropdown_is_wired_to_a_change_listener(tmp_path):
+    # Regression test: the formFilter <select> was rendered but never
+    # attached to applyFilters, so choosing an option did nothing.
+    df = pd.DataFrame(
+        {
+            "account": ["Campaign A"],
+            "Fundraising Page": ["https://secure.actblue.com/page/campaign-a-email"],
+            "Refund Amount": [10.0],
+        }
+    )
+    out_path = tmp_path / "dashboard.html"
+
+    write_dashboard(df, str(out_path))
+
+    html = out_path.read_text()
+    assert 'formFilter.addEventListener("change", applyFilters)' in html
+
+
 def _extract_payload(html):
     line = html.split("const DATA = ", 1)[1].split("\n", 1)[0]
     return json.loads(line.rstrip(";"))
