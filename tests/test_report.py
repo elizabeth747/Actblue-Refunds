@@ -9,6 +9,11 @@ def test_find_column_matches_case_insensitively():
     assert find_column(df, ["refund date", "date"]) == "Refund Date"
 
 
+def test_find_column_prefers_exact_match_over_substring():
+    df = pd.DataFrame(columns=["Reference Code 2", "Reference Code"])
+    assert find_column(df, ["reference code"]) == "Reference Code"
+
+
 def test_find_column_returns_none_when_no_match():
     df = pd.DataFrame(columns=["Order Number"])
     assert find_column(df, ["amount"]) is None

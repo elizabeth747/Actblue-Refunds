@@ -11,8 +11,14 @@ def find_column(df, patterns):
 
     ActBlue's exact CSV column names aren't hard-coded here since they aren't
     guaranteed to be stable; this keeps the summary sheets working without
-    silently mis-mapping data if they change.
+    silently mis-mapping data if they change. Tries an exact match for each
+    pattern before falling back to substring matches, so e.g. "reference
+    code" prefers a column named exactly that over "Reference Code 2".
     """
+    lowered = {col.lower(): col for col in df.columns}
+    for pattern in patterns:
+        if pattern in lowered:
+            return lowered[pattern]
     for pattern in patterns:
         for col in df.columns:
             if pattern in col.lower():

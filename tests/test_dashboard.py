@@ -15,6 +15,9 @@ def test_write_dashboard_embeds_summary_and_table_data(tmp_path):
         {
             "account": ["Campaign A", "Campaign A", "Campaign B"],
             "Receipt ID": ["AB1", "AB2", "AB3"],
+            "Fundraising Page": ["campaign-a-page", "campaign-a-page", "campaign-b-page"],
+            "Reference Code 2": ["should-not-be-picked", "should-not-be-picked", "should-not-be-picked"],
+            "Reference Code": ["fb_ad1", "fb_ad1", "email_1"],
             "Date": ["2026-01-01", "2026-01-15", "2026-02-01"],
             "Refund Amount": [10.0, 5.0, 20.0],
             "Refund Date": ["2026-01-20", "2026-02-01", "2026-02-10"],
@@ -47,6 +50,15 @@ def test_write_dashboard_embeds_summary_and_table_data(tmp_path):
     assert payload["table"]["rows"][0][contrib_idx] != payload["table"]["rows"][0][refund_idx]
     assert payload["table"]["totalRows"] == 3
     assert payload["table"]["truncated"] is False
+
+    assert "Form" in payload["table"]["columns"]
+    form_idx = payload["table"]["columns"].index("Form")
+    assert payload["table"]["rows"][0][form_idx] == "campaign-a-page"
+
+    # Refcode must resolve to "Reference Code", not "Reference Code 2".
+    assert "Refcode" in payload["table"]["columns"]
+    refcode_idx = payload["table"]["columns"].index("Refcode")
+    assert payload["table"]["rows"][0][refcode_idx] == "fb_ad1"
 
 
 def test_write_dashboard_without_amount_column_still_writes_table(tmp_path):
