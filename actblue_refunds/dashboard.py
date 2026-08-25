@@ -15,6 +15,12 @@ from actblue_refunds.report import detect_columns, find_column, summarize_by_acc
 
 _MAX_TABLE_ROWS = 5000
 
+# Only refunds from forms whose slug ends in one of these are shown on the
+# dashboard - "rtext" is covered by the "text" suffix. Anything else (e.g.
+# "dc-web", "my-express", stray tracking slugs) is excluded, not just hidden
+# from the filter dropdown.
+_ALLOWED_FORM_SUFFIXES = ("text", "email", "ads")
+
 # Categorical palette, fixed order (never cycled within 8 slots) - see the
 # dataviz skill's references/palette.md for how this was validated.
 _PALETTE_LIGHT = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"]
@@ -67,6 +73,16 @@ def _pick_table_columns(df, amount_col):
     return columns
 
 
+def _form_slug(value):
+    return str(value).rstrip("/").rsplit("/", 1)[-1]
+
+
+def _matches_allowed_form(value):
+    if pd.isna(value):
+        return False
+    return _form_slug(value).lower().endswith(_ALLOWED_FORM_SUFFIXES)
+
+
 def _cell_value(value, numeric=False, form=False):
     if pd.isna(value):
         return None
@@ -75,14 +91,22 @@ def _cell_value(value, numeric=False, form=False):
             return float(value)
         except (TypeError, ValueError):
             return None
-    value = str(value)
-    if form:
-        value = value.rstrip("/").rsplit("/", 1)[-1]
+    value = _form_slug(value) if form else str(value)
     return value
 
 
 def write_dashboard(df, out_path, start=None, end=None):
     amount_col, date_col = detect_columns(df)
+
+    form_col = find_column(df, ["fundraising page"])
+    excluded = {"count": 0, "total": None}
+    if form_col is not None:
+        keep = df[form_col].apply(_matches_allowed_form)
+        dropped = df[~keep]
+        excluded["count"] = int(len(dropped))
+        if amount_col is not None and excluded["count"]:
+            excluded["total"] = float(dropped[amount_col].sum())
+        df = df[keep]
 
     accounts = _account_order(df)
     colors = {
@@ -131,6 +155,7 @@ def write_dashboard(df, out_path, start=None, end=None):
             "count": total_rows,
             "accountCount": len(accounts),
         },
+        "excludedForms": excluded,
         "byAccount": by_account_records,
         "byMonth": by_month_records,
         "table": {
@@ -254,6 +279,7 @@ _TEMPLATE = """<!doctype html>
 <div class="wrap">
   <h1>Refunds Dashboard</h1>
   <p class="subtitle" id="subtitle"></p>
+  <p class="chart-note" id="excludedNote"></p>
 
   <div class="stats" id="stats"></div>
 
@@ -277,6 +303,7 @@ _TEMPLATE = """<!doctype html>
     <div class="controls">
       <input type="text" id="search" placeholder="Search name, email, employer...">
       <select id="clientFilter"></select>
+      <select id="formFilter"></select>
     </div>
     <div class="table-scroll">
       <table id="table">
@@ -308,6 +335,15 @@ function renderSubtitle() {
   const range = (r && r.start && r.end) ? ` &middot; ${r.start} to ${r.end}` : "";
   document.getElementById("subtitle").innerHTML =
     `${DATA.totals.accountCount} client${DATA.totals.accountCount === 1 ? "" : "s"}${range}`;
+
+  const excluded = DATA.excludedForms;
+  const note = document.getElementById("excludedNote");
+  if (excluded && excluded.count > 0) {
+    const totalPart = excluded.total != null ? `, ${fmtMoney(excluded.total)}` : "";
+    note.textContent = `${fmtInt(excluded.count)} refund${excluded.count === 1 ? "" : "s"}${totalPart} excluded — form isn't text/rtext/email/ads.`;
+  } else {
+    note.textContent = "";
+  }
 }
 
 function renderStats() {
@@ -424,7 +460,17 @@ function renderTable() {
   const clientIdx = t.columns.indexOf("Client");
   const clientFilter = document.getElementById("clientFilter");
   clientFilter.innerHTML = '<option value="">All clients</option>' +
-    DATA.accounts.map(a => `<option value="${a}">${a}</option>`).join("");
+    DATA.accounts.map(a => `<option value="${escapeHtml(a)}">${escapeHtml(a)}</option>`).join("");
+
+  const formIdx = t.columns.indexOf("Form");
+  const formFilter = document.getElementById("formFilter");
+  if (formIdx >= 0) {
+    const forms = [...new Set(t.rows.map(r => r[formIdx]).filter(v => v != null))].sort();
+    formFilter.innerHTML = '<option value="">All forms</option>' +
+      forms.map(f => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join("");
+  } else {
+    formFilter.style.display = "none";
+  }
 
   let sortCol = -1, sortDir = 1;
   let rows = t.rows.slice();
@@ -432,8 +478,10 @@ function renderTable() {
   function applyFilters() {
     const q = document.getElementById("search").value.trim().toLowerCase();
     const client = clientFilter.value;
+    const form = formIdx >= 0 ? formFilter.value : "";
     let filtered = t.rows;
     if (client) filtered = filtered.filter(r => r[clientIdx] === client);
+    if (form) filtered = filtered.filter(r => r[formIdx] === form);
     if (q) filtered = filtered.filter(r => r.some(cell => cell != null && String(cell).toLowerCase().includes(q)));
     rows = filtered;
     if (sortCol >= 0) applySort(false);

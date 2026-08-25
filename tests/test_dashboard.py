@@ -16,9 +16,9 @@ def test_write_dashboard_embeds_summary_and_table_data(tmp_path):
             "account": ["Campaign A", "Campaign A", "Campaign B"],
             "Receipt ID": ["AB1", "AB2", "AB3"],
             "Fundraising Page": [
-                "https://secure.actblue.com/page/campaign-a-page",
-                "https://secure.actblue.com/page/campaign-a-page",
-                "https://secure.actblue.com/page/campaign-b-page",
+                "https://secure.actblue.com/page/campaign-a-rtext",
+                "https://secure.actblue.com/page/campaign-a-rtext",
+                "https://secure.actblue.com/page/campaign-b-email",
             ],
             "Reference Code 2": ["should-not-be-picked", "should-not-be-picked", "should-not-be-picked"],
             "Reference Code": ["fb_ad1", "fb_ad1", "email_1"],
@@ -58,12 +58,37 @@ def test_write_dashboard_embeds_summary_and_table_data(tmp_path):
     # Form shows just the page slug, not the full URL.
     assert "Form" in payload["table"]["columns"]
     form_idx = payload["table"]["columns"].index("Form")
-    assert payload["table"]["rows"][0][form_idx] == "campaign-a-page"
+    assert payload["table"]["rows"][0][form_idx] == "campaign-a-rtext"
 
     # Refcode must resolve to "Reference Code", not "Reference Code 2".
     assert "Refcode" in payload["table"]["columns"]
     refcode_idx = payload["table"]["columns"].index("Refcode")
     assert payload["table"]["rows"][0][refcode_idx] == "fb_ad1"
+
+
+def test_write_dashboard_excludes_refunds_from_untracked_forms(tmp_path):
+    df = pd.DataFrame(
+        {
+            "account": ["Campaign A", "Campaign A", "Campaign A", "Campaign A"],
+            "Receipt ID": ["AB1", "AB2", "AB3", "AB4"],
+            "Fundraising Page": [
+                "https://secure.actblue.com/page/campaign-a-rtext",
+                "https://secure.actblue.com/page/campaign-a-email",
+                "https://secure.actblue.com/page/campaign-a-ads",
+                "https://secure.actblue.com/page/dc-web-home",
+            ],
+            "Refund Amount": [10.0, 20.0, 5.0, 100.0],
+        }
+    )
+    out_path = tmp_path / "dashboard.html"
+
+    write_dashboard(df, str(out_path))
+
+    payload = _extract_payload(out_path.read_text())
+    # The "dc-web-home" refund (form doesn't end in text/rtext/email/ads) is dropped.
+    assert payload["totals"]["count"] == 3
+    assert payload["totals"]["refunded"] == 35.0
+    assert payload["excludedForms"] == {"count": 1, "total": 100.0}
 
 
 def test_write_dashboard_without_amount_column_still_writes_table(tmp_path):
