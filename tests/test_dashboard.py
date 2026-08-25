@@ -28,6 +28,7 @@ def test_form_filter_dropdown_is_wired_to_a_change_listener(tmp_path):
 
     html = out_path.read_text()
     assert 'formFilter.addEventListener("change", applyFilters)' in html
+    assert 'monthFilter.addEventListener("change", applyFilters)' in html
 
 
 def _extract_payload(html):

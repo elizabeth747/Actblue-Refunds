@@ -347,6 +347,7 @@ _TEMPLATE = """<!doctype html>
       <input type="text" id="search" placeholder="Search name, email, employer...">
       <select id="clientFilter"></select>
       <select id="formFilter"></select>
+      <select id="monthFilter"></select>
     </div>
     <div class="table-scroll">
       <table id="table">
@@ -604,6 +605,17 @@ function renderTable() {
     formFilter.style.display = "none";
   }
 
+  // Filters by refund month (not contribution month) to match the "Refunds by month" chart above.
+  const monthIdx = t.columns.indexOf("Refund Date");
+  const monthFilter = document.getElementById("monthFilter");
+  if (monthIdx >= 0) {
+    const months = [...new Set(t.rows.map(r => r[monthIdx]).filter(v => v != null).map(v => String(v).slice(0, 7)))].sort();
+    monthFilter.innerHTML = '<option value="">All months</option>' +
+      months.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join("");
+  } else {
+    monthFilter.style.display = "none";
+  }
+
   let sortCol = -1, sortDir = 1;
   let rows = t.rows.slice();
 
@@ -611,9 +623,11 @@ function renderTable() {
     const q = document.getElementById("search").value.trim().toLowerCase();
     const client = clientFilter.value;
     const form = formIdx >= 0 ? formFilter.value : "";
+    const month = monthIdx >= 0 ? monthFilter.value : "";
     let filtered = t.rows;
     if (client) filtered = filtered.filter(r => r[clientIdx] === client);
     if (form) filtered = filtered.filter(r => r[formIdx] === form);
+    if (month) filtered = filtered.filter(r => r[monthIdx] != null && String(r[monthIdx]).slice(0, 7) === month);
     if (q) filtered = filtered.filter(r => r.some(cell => cell != null && String(cell).toLowerCase().includes(q)));
     rows = filtered;
     if (sortCol >= 0) applySort(false);
@@ -660,6 +674,7 @@ function renderTable() {
   document.getElementById("search").addEventListener("input", applyFilters);
   clientFilter.addEventListener("change", applyFilters);
   if (formIdx >= 0) formFilter.addEventListener("change", applyFilters);
+  if (monthIdx >= 0) monthFilter.addEventListener("change", applyFilters);
 
   renderRows();
 }
