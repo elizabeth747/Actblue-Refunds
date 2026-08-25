@@ -15,7 +15,11 @@ def test_write_dashboard_embeds_summary_and_table_data(tmp_path):
         {
             "account": ["Campaign A", "Campaign A", "Campaign B"],
             "Receipt ID": ["AB1", "AB2", "AB3"],
-            "Fundraising Page": ["campaign-a-page", "campaign-a-page", "campaign-b-page"],
+            "Fundraising Page": [
+                "https://secure.actblue.com/page/campaign-a-page",
+                "https://secure.actblue.com/page/campaign-a-page",
+                "https://secure.actblue.com/page/campaign-b-page",
+            ],
             "Reference Code 2": ["should-not-be-picked", "should-not-be-picked", "should-not-be-picked"],
             "Reference Code": ["fb_ad1", "fb_ad1", "email_1"],
             "Date": ["2026-01-01", "2026-01-15", "2026-02-01"],
@@ -51,6 +55,7 @@ def test_write_dashboard_embeds_summary_and_table_data(tmp_path):
     assert payload["table"]["totalRows"] == 3
     assert payload["table"]["truncated"] is False
 
+    # Form shows just the page slug, not the full URL.
     assert "Form" in payload["table"]["columns"]
     form_idx = payload["table"]["columns"].index("Form")
     assert payload["table"]["rows"][0][form_idx] == "campaign-a-page"

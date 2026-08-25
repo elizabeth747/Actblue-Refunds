@@ -67,7 +67,7 @@ def _pick_table_columns(df, amount_col):
     return columns
 
 
-def _cell_value(value, numeric=False):
+def _cell_value(value, numeric=False, form=False):
     if pd.isna(value):
         return None
     if numeric:
@@ -75,7 +75,10 @@ def _cell_value(value, numeric=False):
             return float(value)
         except (TypeError, ValueError):
             return None
-    return str(value)
+    value = str(value)
+    if form:
+        value = value.rstrip("/").rsplit("/", 1)[-1]
+    return value
 
 
 def write_dashboard(df, out_path, start=None, end=None):
@@ -112,7 +115,10 @@ def write_dashboard(df, out_path, start=None, end=None):
     total_rows = len(df)
     truncated = total_rows > _MAX_TABLE_ROWS
     table_rows = [
-        [_cell_value(row[col], numeric=(label == "Amount")) for label, col in table_columns]
+        [
+            _cell_value(row[col], numeric=(label == "Amount"), form=(label == "Form"))
+            for label, col in table_columns
+        ]
         for _, row in df.head(_MAX_TABLE_ROWS).iterrows()
     ]
 
