@@ -15,6 +15,13 @@ downloads it, and combines every account's rows into one workbook with:
 - **Summary by Account** — refund count and total per account
 - **Summary by Month** — refund count and total per account, per month
 
+It also writes a self-contained HTML **dashboard** (no external dependencies,
+safe to open offline) alongside the workbook: stat tiles, a total-refunded-by-client
+chart, a refunds-by-month chart stacked by client, and a searchable/sortable table
+of every individual refund. It contains the same donor-level detail as the
+"All Refunds" sheet (name, email, address, employer, etc.), so handle it with the
+same care as the underlying export.
+
 ## Setup
 
 1. For each ActBlue entity, generate a Client UUID/Secret pair for the CSV
@@ -57,10 +64,14 @@ python track_refunds.py --start 2026-01-01 --end 2026-08-24 --out refunds_combin
 ```
 
 - `--start` is inclusive, `--end` is exclusive (both `YYYY-MM-DD`), matching
-  ActBlue's API.
+  ActBlue's API. ActBlue rejects ranges longer than 6 months, so for a longer
+  history run this multiple times over shorter windows.
 - If an account's report fails to generate, that account is skipped with an
   error printed to stderr, and the report is built from the remaining
   accounts.
+- The HTML dashboard is written next to `--out` by default (same path with a
+  `.html` extension); override with `--dashboard-out`, or skip it entirely
+  with `--no-dashboard`.
 
 ## Notes
 

@@ -20,9 +20,32 @@ def find_column(df, patterns):
     return None
 
 
+def detect_columns(df):
+    """Returns (amount_col, date_col), either of which may be None if undetected."""
+    return find_column(df, _AMOUNT_PATTERNS), find_column(df, _DATE_PATTERNS)
+
+
+def summarize_by_account(df, amount_col):
+    return (
+        df.groupby("account")[amount_col]
+        .agg(["count", "sum"])
+        .rename(columns={"count": "refund_count", "sum": "total_refunded"})
+        .sort_values("total_refunded", ascending=False)
+    )
+
+
+def summarize_by_month(df, amount_col, date_col):
+    month = pd.to_datetime(df[date_col], errors="coerce").dt.to_period("M").astype(str)
+    return (
+        df.assign(_month=month)
+        .groupby(["_month", "account"])[amount_col]
+        .agg(["count", "sum"])
+        .rename(columns={"count": "refund_count", "sum": "total_refunded"})
+    )
+
+
 def write_report(df, out_path):
-    amount_col = find_column(df, _AMOUNT_PATTERNS)
-    date_col = find_column(df, _DATE_PATTERNS)
+    amount_col, date_col = detect_columns(df)
 
     with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="All Refunds", index=False)
@@ -34,20 +57,7 @@ def write_report(df, out_path):
             note.to_excel(writer, sheet_name="Summary", index=False)
             return
 
-        by_account = (
-            df.groupby("account")[amount_col]
-            .agg(["count", "sum"])
-            .rename(columns={"count": "refund_count", "sum": "total_refunded"})
-            .sort_values("total_refunded", ascending=False)
-        )
-        by_account.to_excel(writer, sheet_name="Summary by Account")
+        summarize_by_account(df, amount_col).to_excel(writer, sheet_name="Summary by Account")
 
         if date_col is not None:
-            month = pd.to_datetime(df[date_col], errors="coerce").dt.to_period("M").astype(str)
-            by_month = (
-                df.assign(_month=month)
-                .groupby(["_month", "account"])[amount_col]
-                .agg(["count", "sum"])
-                .rename(columns={"count": "refund_count", "sum": "total_refunded"})
-            )
-            by_month.to_excel(writer, sheet_name="Summary by Month")
+            summarize_by_month(df, amount_col, date_col).to_excel(writer, sheet_name="Summary by Month")

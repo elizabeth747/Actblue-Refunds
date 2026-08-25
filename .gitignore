@@ -1,6 +1,7 @@
 .env
 accounts.yaml
 refunds_combined.xlsx
+refunds_combined.html
 __pycache__/
 *.pyc
 .venv/
