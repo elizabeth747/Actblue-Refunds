@@ -6,6 +6,14 @@
  * the refunded donation came from (via the "Mapping" tab) and appends a row
  * to the "Refund Log" tab.
  *
+ * Auth note: ActBlue's webhook form sends credentials as HTTP Basic Auth
+ * (Username/Password), but Apps Script web apps cannot read incoming HTTP
+ * headers - there is no way to verify a Basic Auth header here. Instead,
+ * put a long random secret in the Endpoint URL's query string (e.g.
+ * ".../exec?token=SECRET") and set that same value via setWebhookToken().
+ * The Username/Password fields on ActBlue's form still need something
+ * entered (required fields) but are not checked by this script.
+ *
  * Setup instructions: see SETUP.md in this repo.
  */
 
