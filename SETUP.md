@@ -53,8 +53,12 @@ Save it.
 
 ## 5. Test it
 
-1. If ActBlue's webhook UI offers a "send test event" option, use it. Otherwise
-   wait for a real refund.
+1. Use ActBlue's **Webhook Simulator** (`/webhook_simulations/new` in your
+   ActBlue dashboard) to send a mock refund payload to your endpoint URL.
+   Note the data it sends is fake/mock data (e.g. a donor named "Refunded
+   Jack") - it's only there to confirm the pipe works end to end, not to
+   validate real numbers. Remove that test row from the Refund Log once
+   confirmed.
 2. Open the **Refund Log** tab (created automatically on first event) in the
    spreadsheet and check the row that shows up. The **Raw Payload** column
    contains the exact JSON ActBlue sent.
@@ -65,7 +69,15 @@ Save it.
    refcode stored somewhere unexpected, or a committee name that doesn't
    match the Mapping tab's Account column).
 
-## 6. Optional: roll up refunds on the Dashboard tab
+## 6. Optional: backfill past refunds
+
+If you want history for refunds that already happened before this webhook
+existed, ActBlue can send those too - request a "backfill" date when you
+register the webhook (or contact ActBlue support afterward). Backfills can
+arrive as a large burst of requests; the script handles that fine since each
+call is a quick, independent spreadsheet append.
+
+## 7. Optional: roll up refunds on the Dashboard tab
 
 Rather than auto-editing your live Dashboard formulas, here's a formula you
 can paste yourself into a new "Refunded" column next to the per-ad table,
