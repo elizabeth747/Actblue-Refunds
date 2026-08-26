@@ -675,7 +675,15 @@ function renderTable() {
   if (formIdx >= 0) formFilter.addEventListener("change", applyFilters);
   if (monthIdx >= 0) monthFilter.addEventListener("change", applyFilters);
 
-  renderRows();
+  // Default to most-recent-refund-first; a later click on any header re-sorts from there.
+  const refundDateIdx = t.columns.indexOf("Refund Date");
+  if (refundDateIdx >= 0) {
+    sortCol = refundDateIdx;
+    sortDir = -1;
+    applySort(false);
+  } else {
+    renderRows();
+  }
 }
 
 function renderAll() {

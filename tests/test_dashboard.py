@@ -31,6 +31,23 @@ def test_form_filter_dropdown_is_wired_to_a_change_listener(tmp_path):
     assert 'monthFilter.addEventListener("change", applyFilters)' in html
 
 
+def test_table_defaults_to_sorting_by_most_recent_refund(tmp_path):
+    df = pd.DataFrame(
+        {
+            "account": ["Campaign A"],
+            "Refund Amount": [10.0],
+            "Refund Date": ["2026-01-20"],
+        }
+    )
+    out_path = tmp_path / "dashboard.html"
+
+    write_dashboard(df, str(out_path))
+
+    html = out_path.read_text()
+    assert "sortCol = refundDateIdx;" in html
+    assert "sortDir = -1;" in html
+
+
 def _extract_payload(html):
     line = html.split("const DATA = ", 1)[1].split("\n", 1)[0]
     return json.loads(line.rstrip(";"))
