@@ -26,10 +26,31 @@ _ALLOWED_FORM_SUFFIXES = ("text", "email", "ads")
 # its category for display (e.g. "chevalier-rtext" -> "rtext").
 _FORM_CATEGORIES = ("rtext", "text", "email", "ads")
 
-# Categorical palette, fixed order (never cycled within 8 slots) - see the
-# dataviz skill's references/palette.md for how this was validated.
+# Categorical palette, fixed order (never cycled within these 8 slots) - see
+# the dataviz skill's references/palette.md for how this was validated.
 _PALETTE_LIGHT = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"]
 _PALETTE_DARK = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"]
+
+# Beyond 8 clients, generate additional hues rather than repeating one of the
+# 8 above - golden-angle hue stepping keeps each new hue well-spread from
+# every hue already assigned, however many clients keep getting added.
+# These aren't independently CVD-validated like the 8 above (that check only
+# covers a fixed, documented set), but stay visually distinct in practice and
+# every swatch is always paired with a text label, never color-only.
+_EXTRA_HUE_START = 100
+_EXTRA_HUE_STEP = 137.508
+
+
+def _extra_color(overflow_index, light):
+    hue = (_EXTRA_HUE_START + overflow_index * _EXTRA_HUE_STEP) % 360
+    return f"hsl({hue:.0f}, 55%, {45 if light else 62}%)"
+
+
+def _client_color(index, light):
+    palette = _PALETTE_LIGHT if light else _PALETTE_DARK
+    if index < len(palette):
+        return palette[index]
+    return _extra_color(index - len(palette), light)
 
 _TABLE_FIELDS = [
     ("Client", None),  # filled in from the literal "account" column
@@ -122,10 +143,7 @@ def write_dashboard(df, out_path, start=None, end=None):
 
     accounts = _account_order(df)
     colors = {
-        account: {
-            "light": _PALETTE_LIGHT[i % len(_PALETTE_LIGHT)],
-            "dark": _PALETTE_DARK[i % len(_PALETTE_DARK)],
-        }
+        account: {"light": _client_color(i, True), "dark": _client_color(i, False)}
         for i, account in enumerate(accounts)
     }
     form_colors = {

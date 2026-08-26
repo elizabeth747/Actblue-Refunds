@@ -173,3 +173,19 @@ def test_write_dashboard_assigns_distinct_colors_per_account(tmp_path):
     payload = _extract_payload(out_path.read_text())
     colors = payload["colors"]
     assert colors["Campaign A"]["light"] != colors["Campaign B"]["light"]
+
+
+def test_write_dashboard_assigns_unique_colors_past_eight_accounts(tmp_path):
+    # Regression test: colors used to cycle mod 8, so a 9th account silently
+    # reused the 1st account's color.
+    accounts = [f"Campaign {i}" for i in range(10)]
+    df = pd.DataFrame({"account": accounts, "Refund Amount": [1.0] * 10})
+    out_path = tmp_path / "dashboard.html"
+
+    write_dashboard(df, str(out_path))
+
+    payload = _extract_payload(out_path.read_text())
+    light_colors = [payload["colors"][a]["light"] for a in accounts]
+    dark_colors = [payload["colors"][a]["dark"] for a in accounts]
+    assert len(set(light_colors)) == len(accounts)
+    assert len(set(dark_colors)) == len(accounts)
