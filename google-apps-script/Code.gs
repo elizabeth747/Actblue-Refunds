@@ -127,27 +127,38 @@ function firstDefined_() {
 }
 
 function logRow_(refund, matchStatusOverride, rawBody) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = getOrCreateRefundLogSheet_(ss);
-  const refcode = (refund.refcode || '').toString().trim();
-  const fbAdName = lookupAdName_(ss, refcode);
+  // Multiple ActBlue accounts can point at this same webhook (e.g. several
+  // client committees), so concurrent calls are expected - especially during
+  // a backfill, which can burst many requests at once. Serialize the
+  // read-then-append below so two simultaneous calls can't collide on the
+  // same row.
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = getOrCreateRefundLogSheet_(ss);
+    const refcode = (refund.refcode || '').toString().trim();
+    const fbAdName = lookupAdName_(ss, refcode);
 
-  const matchStatus =
-    matchStatusOverride ||
-    (fbAdName ? 'MATCHED' : refcode ? 'NO MATCH FOUND IN MAPPING TAB' : 'NO REFCODE ON PAYLOAD');
+    const matchStatus =
+      matchStatusOverride ||
+      (fbAdName ? 'MATCHED' : refcode ? 'NO MATCH FOUND IN MAPPING TAB' : 'NO REFCODE ON PAYLOAD');
 
-  sheet.appendRow([
-    new Date(),
-    refund.contributionDate || '',
-    refund.refundedAt || '',
-    refund.account || '',
-    refcode,
-    fbAdName,
-    refund.amount || '',
-    refund.orderNumber || '',
-    matchStatus,
-    rawBody,
-  ]);
+    sheet.appendRow([
+      new Date(),
+      refund.contributionDate || '',
+      refund.refundedAt || '',
+      refund.account || '',
+      refcode,
+      fbAdName,
+      refund.amount || '',
+      refund.orderNumber || '',
+      matchStatus,
+      rawBody,
+    ]);
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function getOrCreateRefundLogSheet_(ss) {
