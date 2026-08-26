@@ -58,21 +58,22 @@ Save it.
 2. Open the **Refund Log** tab (created automatically on first event) in the
    spreadsheet and check the row that shows up. The **Raw Payload** column
    contains the exact JSON ActBlue sent.
-3. If **FB Ad Name** / **Refund Amount** came through blank or under
-   "NO MATCH FOUND" / parsing looks off, paste that Raw Payload value back
-   to Claude - `extractRefundFields_()` in `Code.gs` is intentionally a
-   best-guess mapping until confirmed against a real payload, and is a
-   quick edit once we know the exact field names.
+3. If **FB Ad Name** shows "NO MATCH FOUND IN MAPPING TAB" or the row's Match
+   Status looks off, paste that row's Raw Payload value back to Claude -
+   `extractRefundedLineItems_()` in `Code.gs` is built against ActBlue's
+   documented payload shape but may need a tweak for edge cases (e.g. a
+   refcode stored somewhere unexpected, or a committee name that doesn't
+   match the Mapping tab's Account column).
 
 ## 6. Optional: roll up refunds on the Dashboard tab
 
 Rather than auto-editing your live Dashboard formulas, here's a formula you
 can paste yourself into a new "Refunded" column next to the per-ad table,
-assuming that table's Ad Name column is `A` and Refund Log's Ad Name/Amount
-columns are `E`/`F`:
+assuming that table's Ad Name column is `A` and Refund Log's FB Ad Name/Refund
+Amount columns are `F`/`G`:
 
 ```
-=SUMIFS('Refund Log'!F:F, 'Refund Log'!E:E, A2)
+=SUMIFS('Refund Log'!G:G, 'Refund Log'!F:F, A2)
 ```
 
 Adjust the row/column references to match wherever you add it.

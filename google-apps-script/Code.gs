@@ -1,10 +1,22 @@
 /**
  * ActBlue refund webhook receiver, bound to the "Meta Ad Report" spreadsheet.
  *
- * Deploy this as a Web App (Deploy > New deployment > Web app). ActBlue POSTs
- * refund events to the resulting URL; this script looks up which Facebook ad
- * the refunded donation came from (via the "Mapping" tab) and appends a row
- * to the "Refund Log" tab.
+ * Deploy this as a Web App (Deploy > New deployment > Web app). Register the
+ * resulting URL as an "ActBlue Default Refunds" webhook - because the webhook
+ * event type is chosen at registration, every call this script receives is a
+ * refund notification. It looks up which Facebook ad the refunded donation
+ * came from (via the "Mapping" tab) and appends one row per refunded line
+ * item to the "Refund Log" tab.
+ *
+ * Payload shape (confirmed against ActBlue's docs example):
+ *   {
+ *     "contribution": { "orderNumber", "createdAt", "refcodes": { "refcode", "refcodeCustom", "refcode2" }, ... },
+ *     "lineitems": [ { "committeeName", "amount", "refundedAt", "lineitemId", ... }, ... ],
+ *     "donor": {...},
+ *     "form": {...}
+ *   }
+ * A single order can have multiple line items (e.g. split/joint contributions
+ * across committees); only the ones with a non-null "refundedAt" are refunds.
  *
  * Auth note: ActBlue's webhook form sends credentials as HTTP Basic Auth
  * (Username/Password), but Apps Script web apps cannot read incoming HTTP
@@ -14,6 +26,11 @@
  * The Username/Password fields on ActBlue's form still need something
  * entered (required fields) but are not checked by this script.
  *
+ * ActBlue recommends acknowledging receipt (200 response) before doing any
+ * heavy processing, since backfills/high-volume periods can send many
+ * requests quickly - this script's per-request work is a couple of small
+ * spreadsheet reads/appends, which is cheap enough to do inline.
+ *
  * Setup instructions: see SETUP.md in this repo.
  */
 
@@ -21,8 +38,9 @@ const REFUND_LOG_SHEET = 'Refund Log';
 const MAPPING_SHEET = 'Mapping';
 const REFUND_LOG_HEADERS = [
   'Received At',
-  'Refund/Contribution Date',
-  'Account',
+  'Contribution Date',
+  'Refunded At',
+  'Account (Committee)',
   'Refcode',
   'FB Ad Name',
   'Refund Amount',
@@ -35,21 +53,35 @@ function doPost(e) {
   const rawBody = (e && e.postData) ? e.postData.contents : '';
 
   if (!isAuthorized_(e)) {
-    logRefund_(
-      { refcode: '', amount: '', orderNumber: '', contributionDate: '', matchStatus: 'REJECTED: bad or missing token' },
+    logRow_(
+      { contributionDate: '', refundedAt: '', account: '', refcode: '', amount: '', orderNumber: '' },
+      'REJECTED: bad or missing token',
       rawBody
     );
     return jsonResponse_({ status: 'unauthorized' });
   }
 
   try {
-    const payload = parsePayload_(rawBody);
-    const refund = extractRefundFields_(payload);
-    logRefund_(refund, rawBody);
+    const payload = JSON.parse(rawBody);
+    const refunds = extractRefundedLineItems_(payload);
+
+    if (refunds.length === 0) {
+      logRow_(
+        { contributionDate: (payload.contribution || {}).createdAt || '', refundedAt: '', account: '', refcode: '', amount: '', orderNumber: (payload.contribution || {}).orderNumber || '' },
+        'NO LINE ITEM MARKED REFUNDED',
+        rawBody
+      );
+    } else {
+      refunds.forEach(function (refund) {
+        logRow_(refund, '', rawBody);
+      });
+    }
+
     return jsonResponse_({ status: 'ok' });
   } catch (err) {
-    logRefund_(
-      { refcode: '', amount: '', orderNumber: '', contributionDate: '', matchStatus: 'ERROR: ' + err.message },
+    logRow_(
+      { contributionDate: '', refundedAt: '', account: '', refcode: '', amount: '', orderNumber: '' },
+      'ERROR: ' + err.message,
       rawBody
     );
     return jsonResponse_({ status: 'logged_with_error' });
@@ -62,47 +94,28 @@ function isAuthorized_(e) {
   return !!expected && !!provided && expected === provided;
 }
 
-function parsePayload_(rawBody) {
-  if (!rawBody) return {};
-  try {
-    return JSON.parse(rawBody);
-  } catch (jsonErr) {
-    // Not JSON. ActBlue's classic API can deliver XML - if that's what you're
-    // seeing in the Raw Payload column, tell Claude and it'll add an XML
-    // parser here instead of this fallback.
-    return { __raw: rawBody };
-  }
-}
-
 /**
- * TODO: this is a best-guess mapping of common ActBlue payload shapes.
- * Confirm it against a real refund payload (check the "Raw Payload" column
- * in the Refund Log after your first test webhook) and adjust the field
- * paths below to match exactly what ActBlue actually sends.
+ * Returns one entry per refunded line item: { contributionDate, refundedAt,
+ * account, refcode, amount, orderNumber }.
  */
-function extractRefundFields_(payload) {
-  const contribution = payload.contribution || payload;
+function extractRefundedLineItems_(payload) {
+  const contribution = payload.contribution || {};
   const refcodes = contribution.refcodes || {};
+  const refcode = firstDefined_(refcodes.refcode, refcodes.refcodeCustom, refcodes.refcode2) || '';
+  const lineitems = payload.lineitems || [];
 
-  const refcode = firstDefined_(refcodes.refcode, contribution.refcode, payload.refcode);
-  const amount = firstDefined_(
-    contribution.refund && contribution.refund.amount,
-    contribution.amount,
-    payload.amount
-  );
-  const orderNumber = firstDefined_(contribution.orderNumber, payload.orderNumber);
-  const contributionDate = firstDefined_(
-    contribution.refundedAt,
-    contribution.createdAt,
-    payload.date
-  );
-
-  return {
-    refcode: refcode || '',
-    amount: amount || '',
-    orderNumber: orderNumber || '',
-    contributionDate: contributionDate || '',
-  };
+  return lineitems
+    .filter(function (li) { return !!li.refundedAt; })
+    .map(function (li) {
+      return {
+        contributionDate: contribution.createdAt || '',
+        refundedAt: li.refundedAt || '',
+        account: li.committeeName || '',
+        refcode: refcode,
+        amount: li.amount || '',
+        orderNumber: contribution.orderNumber || '',
+      };
+    });
 }
 
 function firstDefined_() {
@@ -113,22 +126,23 @@ function firstDefined_() {
   return null;
 }
 
-function logRefund_(refund, rawBody) {
+function logRow_(refund, matchStatusOverride, rawBody) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = getOrCreateRefundLogSheet_(ss);
   const refcode = (refund.refcode || '').toString().trim();
-  const match = lookupAdName_(ss, refcode);
+  const fbAdName = lookupAdName_(ss, refcode);
 
   const matchStatus =
-    refund.matchStatus ||
-    (match.fbAdName ? 'MATCHED' : refcode ? 'NO MATCH FOUND IN MAPPING TAB' : 'NO REFCODE ON PAYLOAD');
+    matchStatusOverride ||
+    (fbAdName ? 'MATCHED' : refcode ? 'NO MATCH FOUND IN MAPPING TAB' : 'NO REFCODE ON PAYLOAD');
 
   sheet.appendRow([
     new Date(),
     refund.contributionDate || '',
-    match.account || '',
+    refund.refundedAt || '',
+    refund.account || '',
     refcode,
-    match.fbAdName || '',
+    fbAdName,
     refund.amount || '',
     refund.orderNumber || '',
     matchStatus,
@@ -147,21 +161,20 @@ function getOrCreateRefundLogSheet_(ss) {
 }
 
 function lookupAdName_(ss, refcode) {
-  if (!refcode) return { fbAdName: '', account: '' };
+  if (!refcode) return '';
   const mappingSheet = ss.getSheetByName(MAPPING_SHEET);
-  if (!mappingSheet) return { fbAdName: '', account: '' };
+  if (!mappingSheet) return '';
 
   const data = mappingSheet.getDataRange().getValues();
   // Expects header row: Ad Name in FB | Ad Name in Refcode | Account
   for (let i = 1; i < data.length; i++) {
     const fbName = data[i][0];
     const refcodeInSheet = (data[i][1] || '').toString().trim();
-    const account = data[i][2];
     if (refcodeInSheet && refcodeInSheet.toLowerCase() === refcode.toLowerCase()) {
-      return { fbAdName: fbName, account: account };
+      return fbName;
     }
   }
-  return { fbAdName: '', account: '' };
+  return '';
 }
 
 function jsonResponse_(obj) {
@@ -177,4 +190,28 @@ function jsonResponse_(obj) {
 function setWebhookToken() {
   const token = 'REPLACE_WITH_A_LONG_RANDOM_STRING';
   PropertiesService.getScriptProperties().setProperty('WEBHOOK_TOKEN', token);
+}
+
+/**
+ * Optional: paste ActBlue's example refund payload here and run this function
+ * from the Apps Script editor to sanity-check extraction logic without
+ * needing a live webhook call.
+ */
+function testWithSamplePayload() {
+  const sample = {
+    contribution: {
+      createdAt: '2019-01-18T20:44:25-05:00',
+      orderNumber: 'AB00000000',
+      refcodes: { refcode: 'r1', refcode2: 'r2', refcodeCustom: 'r3' },
+    },
+    lineitems: [
+      {
+        committeeName: 'LoremIpsum for Congress',
+        amount: '25.9',
+        refundedAt: '2017-10-03T13:48:26-04:00',
+        lineitemId: 99999999,
+      },
+    ],
+  };
+  Logger.log(JSON.stringify(extractRefundedLineItems_(sample), null, 2));
 }
