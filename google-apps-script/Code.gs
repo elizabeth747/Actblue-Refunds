@@ -18,6 +18,11 @@
  * A single order can have multiple line items (e.g. split/joint contributions
  * across committees); only the ones with a non-null "refundedAt" are refunds.
  *
+ * Only refunds that match a refcode in the "Mapping" tab (i.e. ones actually
+ * attributed to a Facebook ad) get written to the sheet. Refunds with no
+ * refcode, or a refcode not found in Mapping, are dropped silently (visible
+ * only in Executions/Logger if you need to check, not in the sheet).
+ *
  * Auth note: ActBlue's webhook form sends credentials as HTTP Basic Auth
  * (Username/Password), but Apps Script web apps cannot read incoming HTTP
  * headers - there is no way to verify a Basic Auth header here. Instead,
@@ -61,11 +66,7 @@ function doPost(e) {
   const rawBody = (e && e.postData) ? e.postData.contents : '';
 
   if (!isAuthorized_(e)) {
-    logRow_(
-      { contributionDate: '', refundedAt: '', account: '', refcode: '', amount: '', orderNumber: '' },
-      'REJECTED: bad or missing token',
-      rawBody
-    );
+    Logger.log('Rejected webhook call: bad or missing token');
     return jsonResponse_({ status: 'unauthorized' });
   }
 
@@ -74,24 +75,16 @@ function doPost(e) {
     const refunds = extractRefundedLineItems_(payload);
 
     if (refunds.length === 0) {
-      logRow_(
-        { contributionDate: (payload.contribution || {}).createdAt || '', refundedAt: '', account: '', refcode: '', amount: '', orderNumber: (payload.contribution || {}).orderNumber || '' },
-        'NO LINE ITEM MARKED REFUNDED',
-        rawBody
-      );
+      Logger.log('No line item marked refunded: ' + rawBody);
     } else {
       refunds.forEach(function (refund) {
-        logRow_(refund, '', rawBody);
+        logIfMatchedToAd_(refund, rawBody);
       });
     }
 
     return jsonResponse_({ status: 'ok' });
   } catch (err) {
-    logRow_(
-      { contributionDate: '', refundedAt: '', account: '', refcode: '', amount: '', orderNumber: '' },
-      'ERROR: ' + err.message,
-      rawBody
-    );
+    Logger.log('Error processing webhook (' + err.message + '): ' + rawBody);
     return jsonResponse_({ status: 'logged_with_error' });
   }
 }
@@ -134,7 +127,7 @@ function firstDefined_() {
   return null;
 }
 
-function logRow_(refund, matchStatusOverride, rawBody) {
+function logIfMatchedToAd_(refund, rawBody) {
   // Multiple ActBlue accounts can point at this same webhook (e.g. several
   // client committees), so concurrent calls are expected - especially during
   // a backfill, which can burst many requests at once. Serialize the
@@ -144,14 +137,17 @@ function logRow_(refund, matchStatusOverride, rawBody) {
   lock.waitLock(30000);
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const sheet = getOrCreateRefundLogSheet_(ss);
     const refcode = (refund.refcode || '').toString().trim();
     const fbAdName = lookupAdName_(ss, refcode);
 
-    const matchStatus =
-      matchStatusOverride ||
-      (fbAdName ? 'MATCHED' : refcode ? 'NO MATCH FOUND IN MAPPING TAB' : 'NO REFCODE ON PAYLOAD');
+    if (!fbAdName) {
+      // Not attributed to a known Facebook ad (no refcode, or refcode not
+      // found in Mapping) - skip it, don't clutter the sheet.
+      Logger.log('Skipping refund not matched to an ad (refcode: "' + refcode + '")');
+      return;
+    }
 
+    const sheet = getOrCreateRefundLogSheet_(ss);
     sheet.appendRow([
       new Date(),
       refund.contributionDate || '',
@@ -161,7 +157,7 @@ function logRow_(refund, matchStatusOverride, rawBody) {
       fbAdName,
       refund.amount || '',
       refund.orderNumber || '',
-      matchStatus,
+      'MATCHED',
       rawBody,
     ]);
   } finally {
