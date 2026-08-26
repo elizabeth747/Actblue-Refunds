@@ -34,6 +34,14 @@
  * Setup instructions: see SETUP.md in this repo.
  */
 
+function doGet(e) {
+  // Visiting the deployed URL in a browser sends a GET, not the POST ActBlue
+  // sends - this just avoids an "error" page when someone checks the link.
+  return ContentService.createTextOutput(
+    'ActBlue refund webhook is live. Configure ActBlue to POST refund events to this URL.'
+  ).setMimeType(ContentService.MimeType.TEXT);
+}
+
 const REFUND_LOG_SHEET = 'Refund Log';
 const MAPPING_SHEET = 'Mapping';
 const REFUND_LOG_HEADERS = [
