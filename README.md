@@ -17,8 +17,9 @@ downloads it, and combines every account's rows into one workbook with:
 
 It also writes a self-contained HTML **dashboard** (no external dependencies,
 safe to open offline) alongside the workbook: stat tiles, a total-refunded-by-client
-chart, a refunds-by-month chart stacked by client, and a searchable/sortable table
-of every individual refund. It contains the same donor-level detail as the
+chart, a refunds-by-month chart stacked by client, and a sortable table of
+every individual refund, filterable by client/form/month. It contains the
+same donor-level detail as the
 "All Refunds" sheet (name, email, address, employer, etc.), so handle it with the
 same care as the underlying export.
 

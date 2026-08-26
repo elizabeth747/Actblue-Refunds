@@ -2,9 +2,10 @@
 
 Produces one static file with no external dependencies (safe to open offline):
 stat tiles, a by-client bar chart, a by-month stacked bar chart, and a
-searchable/sortable table of every individual refund. Contains donor-level
-detail (name, email, employer, etc.) pulled straight from the ActBlue export,
-so treat the output file with the same care as the underlying CSV/xlsx.
+sortable table of every individual refund, filterable by client/form/month.
+Contains donor-level detail (name, email, employer, etc.) pulled straight
+from the ActBlue export, so treat the output file with the same care as the
+underlying CSV/xlsx.
 """
 
 import colorsys
@@ -329,11 +330,10 @@ _TEMPLATE = """<!doctype html>
   }
   .tooltip.visible { opacity: 0.95; }
   .controls { display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
-  .controls input, .controls select {
+  .controls select {
     background: var(--page); color: var(--text-primary); border: 1px solid var(--border);
     border-radius: 8px; padding: 8px 10px; font-size: 13px; font-family: inherit;
   }
-  .controls input { flex: 1; min-width: 200px; }
   .table-note { font-size: 12px; color: var(--text-muted); margin: 0 0 10px; }
   .table-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; }
   table { border-collapse: collapse; width: 100%; font-size: 13px; }
@@ -383,7 +383,6 @@ _TEMPLATE = """<!doctype html>
     <p class="chart-title">All refunds</p>
     <p class="table-note" id="tableNote"></p>
     <div class="controls">
-      <input type="text" id="search" placeholder="Search name, email, employer...">
       <select id="clientFilter"></select>
       <select id="formFilter"></select>
       <select id="monthFilter"></select>
@@ -659,7 +658,6 @@ function renderTable() {
   let rows = t.rows.slice();
 
   function applyFilters() {
-    const q = document.getElementById("search").value.trim().toLowerCase();
     const client = clientFilter.value;
     const form = formIdx >= 0 ? formFilter.value : "";
     const month = monthIdx >= 0 ? monthFilter.value : "";
@@ -667,7 +665,6 @@ function renderTable() {
     if (client) filtered = filtered.filter(r => r[clientIdx] === client);
     if (form) filtered = filtered.filter(r => r[formIdx] === form);
     if (month) filtered = filtered.filter(r => r[monthIdx] != null && String(r[monthIdx]).slice(0, 7) === month);
-    if (q) filtered = filtered.filter(r => r.some(cell => cell != null && String(cell).toLowerCase().includes(q)));
     rows = filtered;
     if (sortCol >= 0) applySort(false);
     else renderRows();
@@ -710,7 +707,6 @@ function renderTable() {
       applySort(true);
     });
   });
-  document.getElementById("search").addEventListener("input", applyFilters);
   clientFilter.addEventListener("change", applyFilters);
   if (formIdx >= 0) formFilter.addEventListener("change", applyFilters);
   if (monthIdx >= 0) monthFilter.addEventListener("change", applyFilters);
