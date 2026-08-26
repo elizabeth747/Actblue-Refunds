@@ -13,10 +13,37 @@ from actblue_refunds.notify import find_new_refunds, summarize_new_refunds
 from actblue_refunds.report import detect_columns, write_report
 
 
+def rolling_window(months_back, today=None):
+    """Returns (start, end) as YYYY-MM-DD strings: a `months_back`-month window
+    ending tomorrow (exclusive), so it always includes today's refunds.
+
+    Deriving start from end (rather than computing "today minus N months" and
+    "tomorrow" separately) keeps the span exactly `months_back` calendar
+    months, never a day over. Uses pandas' DateOffset rather than naive
+    date(year, month - N, day) arithmetic, which raises ValueError outright
+    for a start day that doesn't exist in the target month (e.g. Aug 31 minus
+    6 months has no Feb 31) - DateOffset clamps to the month's last day
+    instead.
+    """
+    today = pd.Timestamp.now().normalize() if today is None else pd.Timestamp(today).normalize()
+    end = today + pd.Timedelta(days=1)
+    start = end - pd.DateOffset(months=months_back)
+    return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Combine ActBlue refund data across multiple accounts.")
-    parser.add_argument("--start", required=True, help="Start date, inclusive, YYYY-MM-DD")
-    parser.add_argument("--end", required=True, help="End date, exclusive, YYYY-MM-DD")
+    parser.add_argument("--start", help="Start date, inclusive, YYYY-MM-DD (required unless --months-back is given)")
+    parser.add_argument("--end", help="End date, exclusive, YYYY-MM-DD (required unless --months-back is given)")
+    parser.add_argument(
+        "--months-back",
+        type=int,
+        help=(
+            "Instead of --start/--end, use a rolling window of this many months ending tomorrow "
+            "(exclusive), so it always includes today. Handles month-end dates safely (e.g. Aug 31 "
+            "minus 6 months clamps to Feb 28) - safer than computing --start by hand each day."
+        ),
+    )
     parser.add_argument("--config", default="accounts.yaml", help="Path to accounts config file")
     parser.add_argument("--out", default="refunds_combined.xlsx", help="Output spreadsheet path")
     parser.add_argument(
@@ -36,7 +63,17 @@ def parse_args(argv=None):
         help="Where to write newly-seen refunds as JSON, for notification tooling",
     )
     parser.add_argument("--no-notify", action="store_true", help="Skip new-refund tracking entirely")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+
+    if args.months_back is not None:
+        if args.start is None and args.end is None:
+            args.start, args.end = rolling_window(args.months_back)
+        else:
+            parser.error("--months-back can't be combined with --start/--end")
+    elif args.start is None or args.end is None:
+        parser.error("either both --start and --end, or --months-back, is required")
+
+    return args
 
 
 def main(argv=None):

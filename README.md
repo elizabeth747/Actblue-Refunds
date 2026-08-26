@@ -66,6 +66,11 @@ python track_refunds.py --start 2026-01-01 --end 2026-08-24 --out refunds_combin
 - `--start` is inclusive, `--end` is exclusive (both `YYYY-MM-DD`), matching
   ActBlue's API. ActBlue rejects ranges longer than 6 months, so for a longer
   history run this multiple times over shorter windows.
+- For a recurring "last N months, including today" run (e.g. a daily cron/
+  routine), use `--months-back N` instead of computing `--start`/`--end` by
+  hand: `python track_refunds.py --months-back 6 --out refunds_combined.xlsx`.
+  It handles month-end dates correctly (e.g. Aug 31 minus 6 months safely
+  lands on Feb 28, rather than crashing on a nonexistent "Feb 31").
 - If an account's report fails to generate, that account is skipped with an
   error printed to stderr, and the report is built from the remaining
   accounts.
