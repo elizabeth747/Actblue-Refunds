@@ -72,6 +72,13 @@ python track_refunds.py --start 2026-01-01 --end 2026-08-24 --out refunds_combin
 - The HTML dashboard is written next to `--out` by default (same path with a
   `.html` extension); override with `--dashboard-out`, or skip it entirely
   with `--no-dashboard`.
+- Each run also tracks which refunds it's already seen (by `Refund ID`) in
+  `--notify-state` (default `refund_notify_state.json`) and writes any newly
+  seen ones to `--new-refunds-out` (default `new_refunds.json`) — the first
+  run just establishes the baseline (nothing is "new" yet). This is data
+  only; the tool itself doesn't send anything, so pair it with your own
+  automation (or an agent) to act on `new_refunds.json`. Skip it entirely
+  with `--no-notify`.
 
 ## Notes
 

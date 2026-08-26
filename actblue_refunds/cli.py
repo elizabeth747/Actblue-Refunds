@@ -1,5 +1,6 @@
 import argparse
 import io
+import json
 import sys
 
 import pandas as pd
@@ -8,7 +9,8 @@ from dotenv import load_dotenv
 from actblue_refunds.accounts import MissingCredentialsError, load_accounts
 from actblue_refunds.client import ActBlueAPIError, ActBlueClient
 from actblue_refunds.dashboard import write_dashboard
-from actblue_refunds.report import write_report
+from actblue_refunds.notify import find_new_refunds, summarize_new_refunds
+from actblue_refunds.report import detect_columns, write_report
 
 
 def parse_args(argv=None):
@@ -23,6 +25,17 @@ def parse_args(argv=None):
         help="Output HTML dashboard path (default: --out with a .html extension)",
     )
     parser.add_argument("--no-dashboard", action="store_true", help="Skip generating the HTML dashboard")
+    parser.add_argument(
+        "--notify-state",
+        default="refund_notify_state.json",
+        help="Path to the new-refund tracking state file (which refund IDs have already been seen)",
+    )
+    parser.add_argument(
+        "--new-refunds-out",
+        default="new_refunds.json",
+        help="Where to write newly-seen refunds as JSON, for notification tooling",
+    )
+    parser.add_argument("--no-notify", action="store_true", help="Skip new-refund tracking entirely")
     return parser.parse_args(argv)
 
 
@@ -64,6 +77,20 @@ def main(argv=None):
         dashboard_out = args.dashboard_out or _default_dashboard_path(args.out)
         write_dashboard(combined, dashboard_out, start=args.start, end=args.end)
         print(f"Wrote dashboard to {dashboard_out}")
+
+    if not args.no_notify:
+        new_df, bootstrapped = find_new_refunds(combined, args.notify_state)
+        amount_col, _ = detect_columns(combined)
+        new_refunds = summarize_new_refunds(new_df, amount_col)
+        with open(args.new_refunds_out, "w") as f:
+            json.dump({"bootstrapped": bootstrapped, "new_refunds": new_refunds}, f, indent=2)
+
+        if bootstrapped:
+            print(f"\nEstablished refund-tracking baseline ({len(combined)} refunds) - nothing to notify about yet.")
+        elif new_refunds:
+            print(f"\n{len(new_refunds)} new refund(s) since last check - see {args.new_refunds_out}")
+        else:
+            print("\nNo new refunds since last check.")
 
 
 def _default_dashboard_path(out_path):
