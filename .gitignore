@@ -2,7 +2,6 @@
 accounts.yaml
 refunds_combined.xlsx
 refunds_combined.html
-refund_notify_state.json
 new_refunds.json
 __pycache__/
 *.pyc
