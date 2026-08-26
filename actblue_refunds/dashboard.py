@@ -33,12 +33,11 @@ _PALETTE_DARK = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300
 
 _TABLE_FIELDS = [
     ("Client", None),  # filled in from the literal "account" column
-    ("Receipt ID", ["receipt id"]),
+    ("Amount", None),  # filled in from the caller's detected amount_col
+    ("Refund Date", ["refund date"]),
     ("Form", ["fundraising page"]),
     ("Refcode", ["reference code"]),
     ("Contribution Date", ["date"]),
-    ("Refund Date", ["refund date"]),
-    ("Amount", None),  # filled in from the caller's detected amount_col
     ("First Name", ["donor first name"]),
     ("Last Name", ["donor last name"]),
     ("Email", ["donor email"]),

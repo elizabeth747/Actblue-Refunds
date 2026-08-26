@@ -71,7 +71,8 @@ def test_write_dashboard_embeds_summary_and_table_data(tmp_path):
     assert by_account["Campaign A"]["total"] == 15.0
     assert by_account["Campaign B"]["total"] == 20.0
 
-    assert payload["table"]["columns"][:2] == ["Client", "Receipt ID"]
+    assert payload["table"]["columns"][:3] == ["Client", "Amount", "Refund Date"]
+    assert "Receipt ID" not in payload["table"]["columns"]
     assert "Contribution Date" in payload["table"]["columns"]
     assert "Refund Date" in payload["table"]["columns"]
     # Contribution date and refund date must resolve to distinct source columns.
