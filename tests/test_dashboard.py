@@ -2,7 +2,7 @@ import json
 
 import pandas as pd
 
-from actblue_refunds.dashboard import _form_category, write_dashboard
+from actblue_refunds.dashboard import _circular_distance, _extension_hues, _FIXED_HUES, _form_category, write_dashboard
 
 
 def test_form_category_prefers_rtext_over_text():
@@ -189,3 +189,16 @@ def test_write_dashboard_assigns_unique_colors_past_eight_accounts(tmp_path):
     dark_colors = [payload["colors"][a]["dark"] for a in accounts]
     assert len(set(light_colors)) == len(accounts)
     assert len(set(dark_colors)) == len(accounts)
+
+
+def test_extension_hues_stay_far_from_the_fixed_eight():
+    # Regression test: the 3rd generated hue used to land at 15 degrees,
+    # nearly on top of the fixed palette's orange (17 degrees) - golden-angle
+    # stepping only spaced extension hues from each other, not from the
+    # fixed 8. Every extension hue must clear a real margin from all of them.
+    # (Margins shrink as more get packed onto one wheel - 15 degrees is a
+    # reasonable bar for a client roster in the dozens, not a guarantee that
+    # holds for an unbounded count.)
+    hues = _extension_hues(8)
+    for hue in hues:
+        assert min(_circular_distance(hue, fixed) for fixed in _FIXED_HUES) >= 15

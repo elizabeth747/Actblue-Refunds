@@ -7,6 +7,7 @@ detail (name, email, employer, etc.) pulled straight from the ActBlue export,
 so treat the output file with the same care as the underlying CSV/xlsx.
 """
 
+import colorsys
 import json
 
 import pandas as pd
@@ -31,26 +32,50 @@ _FORM_CATEGORIES = ("rtext", "text", "email", "ads")
 _PALETTE_LIGHT = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"]
 _PALETTE_DARK = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"]
 
+def _hex_hue(hex_color):
+    r, g, b = (int(hex_color.lstrip("#")[i : i + 2], 16) / 255 for i in (0, 2, 4))
+    h, _, _ = colorsys.rgb_to_hsv(r, g, b)
+    return h * 360
+
+
+def _circular_distance(a, b):
+    d = abs(a - b) % 360
+    return min(d, 360 - d)
+
+
 # Beyond 8 clients, generate additional hues rather than repeating one of the
-# 8 above - golden-angle hue stepping keeps each new hue well-spread from
-# every hue already assigned, however many clients keep getting added.
-# These aren't independently CVD-validated like the 8 above (that check only
-# covers a fixed, documented set), but stay visually distinct in practice and
-# every swatch is always paired with a text label, never color-only.
-_EXTRA_HUE_START = 100
-_EXTRA_HUE_STEP = 137.508
+# 8 above. Each new hue is picked to be as far as possible (in hue, on the
+# color wheel) from every hue already in use - the fixed 8 AND every
+# extension hue picked before it - so it never lands close to an existing
+# color regardless of how many clients keep getting added. These aren't
+# independently CVD-validated like the 8 above (that check only covers a
+# fixed, documented set), but stay visually distinct in practice, and every
+# swatch is always paired with a text label, never color-only.
+_FIXED_HUES = [_hex_hue(c) for c in _PALETTE_LIGHT]
+_HUE_CANDIDATES = list(range(0, 360, 2))
 
 
-def _extra_color(overflow_index, light):
-    hue = (_EXTRA_HUE_START + overflow_index * _EXTRA_HUE_STEP) % 360
-    return f"hsl({hue:.0f}, 55%, {45 if light else 62}%)"
+def _extension_hues(count):
+    used = list(_FIXED_HUES)
+    chosen = []
+    for _ in range(count):
+        best = max(_HUE_CANDIDATES, key=lambda h: min(_circular_distance(h, u) for u in used))
+        chosen.append(best)
+        used.append(best)
+    return chosen
 
 
-def _client_color(index, light):
-    palette = _PALETTE_LIGHT if light else _PALETTE_DARK
-    if index < len(palette):
-        return palette[index]
-    return _extra_color(index - len(palette), light)
+def _client_colors(accounts):
+    overflow = max(0, len(accounts) - len(_PALETTE_LIGHT))
+    extension_hues = _extension_hues(overflow)
+    colors = {}
+    for i, account in enumerate(accounts):
+        if i < len(_PALETTE_LIGHT):
+            colors[account] = {"light": _PALETTE_LIGHT[i], "dark": _PALETTE_DARK[i]}
+        else:
+            hue = extension_hues[i - len(_PALETTE_LIGHT)]
+            colors[account] = {"light": f"hsl({hue}, 55%, 45%)", "dark": f"hsl({hue}, 55%, 62%)"}
+    return colors
 
 _TABLE_FIELDS = [
     ("Client", None),  # filled in from the literal "account" column
@@ -142,10 +167,7 @@ def write_dashboard(df, out_path, start=None, end=None):
         df = df[keep]
 
     accounts = _account_order(df)
-    colors = {
-        account: {"light": _client_color(i, True), "dark": _client_color(i, False)}
-        for i, account in enumerate(accounts)
-    }
+    colors = _client_colors(accounts)
     form_colors = {
         category: {"light": _PALETTE_LIGHT[i], "dark": _PALETTE_DARK[i]}
         for i, category in enumerate(_FORM_CATEGORIES)
