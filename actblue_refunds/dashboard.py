@@ -1,0 +1,742 @@
+"""Builds a self-contained HTML dashboard summarizing refunds across accounts.
+
+Produces one static file with no external dependencies (safe to open offline):
+stat tiles, a by-client bar chart, a by-month stacked bar chart, and a
+sortable table of every individual refund, filterable by client/form/month.
+Contains donor-level detail (name, email, employer, etc.) pulled straight
+from the ActBlue export, so treat the output file with the same care as the
+underlying CSV/xlsx.
+"""
+
+import colorsys
+import json
+
+import pandas as pd
+
+from actblue_refunds.report import detect_columns, find_column, summarize_by_account, summarize_by_month
+
+_MAX_TABLE_ROWS = 5000
+
+# Only refunds from forms whose slug ends in one of these are shown on the
+# dashboard - "rtext" is covered by the "text" suffix. Anything else (e.g.
+# "dc-web", "my-express", stray tracking slugs) is excluded, not just hidden
+# from the filter dropdown.
+_ALLOWED_FORM_SUFFIXES = ("text", "email", "ads")
+
+# Same categories, but checked most-specific-first so "rtext" doesn't get
+# swallowed by the "text" suffix - used to reduce a form slug down to just
+# its category for display (e.g. "chevalier-rtext" -> "rtext").
+_FORM_CATEGORIES = ("rtext", "text", "email", "ads")
+
+# Categorical palette, fixed order (never cycled within these 8 slots) - see
+# the dataviz skill's references/palette.md for how this was validated.
+_PALETTE_LIGHT = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"]
+_PALETTE_DARK = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"]
+
+def _hex_hue(hex_color):
+    r, g, b = (int(hex_color.lstrip("#")[i : i + 2], 16) / 255 for i in (0, 2, 4))
+    h, _, _ = colorsys.rgb_to_hsv(r, g, b)
+    return h * 360
+
+
+def _circular_distance(a, b):
+    d = abs(a - b) % 360
+    return min(d, 360 - d)
+
+
+# Beyond 8 clients, generate additional hues rather than repeating one of the
+# 8 above. Each new hue is picked to be as far as possible (in hue, on the
+# color wheel) from every hue already in use - the fixed 8 AND every
+# extension hue picked before it - so it never lands close to an existing
+# color regardless of how many clients keep getting added. These aren't
+# independently CVD-validated like the 8 above (that check only covers a
+# fixed, documented set), but stay visually distinct in practice, and every
+# swatch is always paired with a text label, never color-only.
+_FIXED_HUES = [_hex_hue(c) for c in _PALETTE_LIGHT]
+_HUE_CANDIDATES = list(range(0, 360, 2))
+
+
+def _extension_hues(count):
+    used = list(_FIXED_HUES)
+    chosen = []
+    for _ in range(count):
+        best = max(_HUE_CANDIDATES, key=lambda h: min(_circular_distance(h, u) for u in used))
+        chosen.append(best)
+        used.append(best)
+    return chosen
+
+
+def _client_colors(accounts):
+    overflow = max(0, len(accounts) - len(_PALETTE_LIGHT))
+    extension_hues = _extension_hues(overflow)
+    colors = {}
+    for i, account in enumerate(accounts):
+        if i < len(_PALETTE_LIGHT):
+            colors[account] = {"light": _PALETTE_LIGHT[i], "dark": _PALETTE_DARK[i]}
+        else:
+            hue = extension_hues[i - len(_PALETTE_LIGHT)]
+            colors[account] = {"light": f"hsl({hue}, 55%, 45%)", "dark": f"hsl({hue}, 55%, 62%)"}
+    return colors
+
+_TABLE_FIELDS = [
+    ("Client", None),  # filled in from the literal "account" column
+    ("Amount", None),  # filled in from the caller's detected amount_col
+    ("Refund Date", ["refund date"]),
+    ("Form", ["fundraising page"]),
+    ("Refcode", ["reference code"]),
+    ("Contribution Date", ["date"]),
+    ("First Name", ["donor first name"]),
+    ("Last Name", ["donor last name"]),
+    ("Email", ["donor email"]),
+    ("City", ["donor city"]),
+    ("State", ["donor state"]),
+    ("Employer", ["donor employer"]),
+    ("Occupation", ["donor occupation"]),
+    ("Committee", ["recipient committee"]),
+    ("Card Type", ["card type"]),
+]
+
+
+def _account_order(df):
+    seen = []
+    for account in df["account"]:
+        if account not in seen:
+            seen.append(account)
+    return seen
+
+
+def _pick_table_columns(df, amount_col):
+    used = set()
+    columns = []
+
+    def add(label, col):
+        if col and col not in used:
+            used.add(col)
+            columns.append((label, col))
+
+    for label, patterns in _TABLE_FIELDS:
+        if label == "Client":
+            add(label, "account" if "account" in df.columns else None)
+        elif label == "Amount":
+            add(label, amount_col)
+        else:
+            add(label, find_column(df, patterns))
+    return columns
+
+
+def _form_slug(value):
+    return str(value).rstrip("/").rsplit("/", 1)[-1]
+
+
+def _matches_allowed_form(value):
+    if pd.isna(value):
+        return False
+    return _form_slug(value).lower().endswith(_ALLOWED_FORM_SUFFIXES)
+
+
+def _form_category(value):
+    slug = _form_slug(value).lower()
+    for category in _FORM_CATEGORIES:
+        if slug.endswith(category):
+            return category
+    return slug
+
+
+def _cell_value(value, numeric=False, form=False):
+    if pd.isna(value):
+        return None
+    if numeric:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+    value = _form_category(value) if form else str(value)
+    return value
+
+
+def write_dashboard(df, out_path, start=None, end=None):
+    amount_col, date_col = detect_columns(df)
+
+    form_col = find_column(df, ["fundraising page"])
+    excluded = {"count": 0, "total": None}
+    if form_col is not None:
+        keep = df[form_col].apply(_matches_allowed_form)
+        dropped = df[~keep]
+        excluded["count"] = int(len(dropped))
+        if amount_col is not None and excluded["count"]:
+            excluded["total"] = float(dropped[amount_col].sum())
+        df = df[keep]
+
+    accounts = _account_order(df)
+    colors = _client_colors(accounts)
+    form_colors = {
+        category: {"light": _PALETTE_LIGHT[i], "dark": _PALETTE_DARK[i]}
+        for i, category in enumerate(_FORM_CATEGORIES)
+    }
+
+    by_account_records = []
+    by_month_records = []
+    by_form_records = []
+    total_refunded = None
+    if amount_col is not None:
+        by_account = summarize_by_account(df, amount_col)
+        by_account_records = [
+            {"account": account, "count": int(row.refund_count), "total": float(row.total_refunded)}
+            for account, row in by_account.iterrows()
+        ]
+        total_refunded = float(df[amount_col].sum())
+
+        if date_col is not None:
+            by_month = summarize_by_month(df, amount_col, date_col)
+            by_month_records = [
+                {"month": month, "account": account, "count": int(row.refund_count), "total": float(row.total_refunded)}
+                for (month, account), row in by_month.iterrows()
+            ]
+
+        if form_col is not None:
+            by_form = (
+                df.assign(_form_category=df[form_col].apply(_form_category))
+                .groupby("_form_category")[amount_col]
+                .agg(["count", "sum"])
+            )
+            by_form_records = [
+                {"category": category, "count": int(by_form.loc[category, "count"]), "total": float(by_form.loc[category, "sum"])}
+                for category in _FORM_CATEGORIES
+                if category in by_form.index
+            ]
+
+    table_columns = _pick_table_columns(df, amount_col)
+    total_rows = len(df)
+    truncated = total_rows > _MAX_TABLE_ROWS
+    table_rows = [
+        [
+            _cell_value(row[col], numeric=(label == "Amount"), form=(label == "Form"))
+            for label, col in table_columns
+        ]
+        for _, row in df.head(_MAX_TABLE_ROWS).iterrows()
+    ]
+
+    payload = {
+        "range": {"start": start, "end": end},
+        "accounts": accounts,
+        "colors": colors,
+        "totals": {
+            "refunded": total_refunded,
+            "count": total_rows,
+            "accountCount": len(accounts),
+        },
+        "excludedForms": excluded,
+        "byAccount": by_account_records,
+        "byMonth": by_month_records,
+        "byForm": by_form_records,
+        "formColors": form_colors,
+        "table": {
+            "columns": [label for label, _ in table_columns],
+            "rows": table_rows,
+            "truncated": truncated,
+            "totalRows": total_rows,
+        },
+    }
+
+    html = _TEMPLATE.replace("__DATA__", json.dumps(payload))
+    with open(out_path, "w") as f:
+        f.write(html)
+
+
+_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Refunds Dashboard</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface-1: #fcfcfb;
+    --page: #f9f9f7;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #898781;
+    --grid: #e1e0d9;
+    --baseline: #c3c2b7;
+    --border: rgba(11,11,11,0.10);
+    --hover-wash: rgba(11,11,11,0.04);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --surface-1: #1a1a19;
+      --page: #0d0d0d;
+      --text-primary: #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted: #898781;
+      --grid: #2c2c2a;
+      --baseline: #383835;
+      --border: rgba(255,255,255,0.10);
+      --hover-wash: rgba(255,255,255,0.06);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--text-primary);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 32px 24px 64px; }
+  h1 { font-size: 22px; font-weight: 600; margin: 0 0 4px; }
+  .subtitle { color: var(--text-secondary); font-size: 14px; margin: 0 0 28px; }
+  .card {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+  }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; margin-bottom: 20px; }
+  .stat-label { font-size: 13px; color: var(--text-secondary); margin: 0 0 6px; }
+  .stat-value { font-size: 28px; font-weight: 600; }
+  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin-bottom: 20px; }
+  .donut-wrap { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+  .donut-wrap .legend { flex-direction: column; gap: 8px; margin: 0; }
+  .donut-center-value { font-size: 15px; font-weight: 600; fill: var(--text-primary); }
+  .donut-center-label { font-size: 10px; fill: var(--text-muted); }
+  .chart-title { font-size: 14px; font-weight: 600; margin: 0 0 4px; }
+  .chart-note { font-size: 12px; color: var(--text-muted); margin: 0 0 16px; }
+  .bar-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .bar-label {
+    width: 38%; flex: 0 0 38%; font-size: 13px; color: var(--text-secondary);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .bar-track { flex: 1; position: relative; height: 18px; }
+  .bar-fill {
+    position: absolute; left: 0; top: 0; height: 100%;
+    border-radius: 0 4px 4px 0; min-width: 2px;
+  }
+  .bar-value { font-size: 12px; color: var(--text-secondary); margin-left: 8px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .month-chart { display: flex; align-items: flex-end; gap: 10px; height: 200px; padding-top: 24px; border-bottom: 1px solid var(--baseline); }
+  .month-col { flex: 1; display: flex; flex-direction: column-reverse; align-items: stretch; height: 100%; min-width: 4px; }
+  .month-seg { border-radius: 0; margin-bottom: 2px; }
+  .month-seg:last-child { margin-bottom: 0; }
+  .month-seg:first-child { border-radius: 4px 4px 0 0; }
+  .month-axis { display: flex; gap: 10px; margin-top: 6px; }
+  .month-axis span { flex: 1; text-align: center; font-size: 11px; color: var(--text-muted); min-width: 4px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0 0; }
+  .legend-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); }
+  .legend-swatch { width: 10px; height: 10px; border-radius: 2px; }
+  .tooltip {
+    position: fixed; pointer-events: none; background: var(--text-primary); color: var(--page);
+    font-size: 12px; padding: 6px 9px; border-radius: 6px; opacity: 0; transform: translate(-50%, -100%);
+    transition: opacity 0.08s; z-index: 10; white-space: nowrap;
+  }
+  .tooltip.visible { opacity: 0.95; }
+  .controls { display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+  .controls select {
+    background: var(--page); color: var(--text-primary); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 10px; font-size: 13px; font-family: inherit;
+  }
+  .table-note { font-size: 12px; color: var(--text-muted); margin: 0 0 10px; }
+  .table-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  thead th {
+    position: sticky; top: 0; background: var(--surface-1); text-align: left; padding: 9px 12px;
+    font-weight: 600; color: var(--text-secondary); border-bottom: 1px solid var(--border);
+    white-space: nowrap; cursor: pointer; user-select: none;
+  }
+  thead th:hover { color: var(--text-primary); }
+  thead th .arrow { color: var(--text-muted); margin-left: 4px; }
+  tbody td { padding: 8px 12px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+  tbody tr:hover { background: var(--hover-wash); }
+  .empty-note { padding: 20px; text-align: center; color: var(--text-muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Refunds Dashboard</h1>
+  <p class="subtitle" id="subtitle"></p>
+  <p class="chart-note" id="excludedNote"></p>
+
+  <div class="stats" id="stats"></div>
+
+  <div class="charts">
+    <div class="card">
+      <p class="chart-title">Total refunded by client</p>
+      <p class="chart-note" id="byAccountNote"></p>
+      <div id="byAccountChart"></div>
+    </div>
+    <div class="card">
+      <p class="chart-title">Refunds by month</p>
+      <p class="chart-note">Stacked by client</p>
+      <div id="byMonthChart"></div>
+      <div class="legend" id="byMonthLegend"></div>
+    </div>
+    <div class="card">
+      <p class="chart-title">Refunds by form</p>
+      <p class="chart-note" id="byFormNote"></p>
+      <div class="donut-wrap">
+        <div id="byFormChart"></div>
+        <div class="legend" id="byFormLegend"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <p class="chart-title">All refunds</p>
+    <p class="table-note" id="tableNote"></p>
+    <div class="controls">
+      <select id="clientFilter"></select>
+      <select id="formFilter"></select>
+      <select id="monthFilter"></select>
+    </div>
+    <div class="table-scroll">
+      <table id="table">
+        <thead><tr id="tableHead"></tr></thead>
+        <tbody id="tableBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+const DATA = __DATA__;
+const dark = () => window.matchMedia("(prefers-color-scheme: dark)").matches;
+const fmtMoney = (n) => "$" + n.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const fmtInt = (n) => n.toLocaleString();
+
+const tooltip = document.getElementById("tooltip");
+function showTooltip(evt, text) {
+  tooltip.textContent = text;
+  tooltip.style.left = evt.clientX + "px";
+  tooltip.style.top = (evt.clientY - 10) + "px";
+  tooltip.classList.add("visible");
+}
+function hideTooltip() { tooltip.classList.remove("visible"); }
+
+function renderSubtitle() {
+  const r = DATA.range;
+  const range = (r && r.start && r.end) ? ` &middot; ${r.start} to ${r.end}` : "";
+  document.getElementById("subtitle").innerHTML =
+    `${DATA.totals.accountCount} client${DATA.totals.accountCount === 1 ? "" : "s"}${range}`;
+
+  const excluded = DATA.excludedForms;
+  const note = document.getElementById("excludedNote");
+  if (excluded && excluded.count > 0) {
+    const totalPart = excluded.total != null ? `, ${fmtMoney(excluded.total)}` : "";
+    note.textContent = `${fmtInt(excluded.count)} refund${excluded.count === 1 ? "" : "s"}${totalPart} excluded — form isn't text/rtext/email/ads.`;
+  } else {
+    note.textContent = "";
+  }
+}
+
+function renderStats() {
+  const stats = [
+    ["Total refunded", DATA.totals.refunded != null ? fmtMoney(DATA.totals.refunded) : "—"],
+    ["Total refunds", fmtInt(DATA.totals.count)],
+    ["Clients", fmtInt(DATA.totals.accountCount)],
+  ];
+  document.getElementById("stats").innerHTML = stats.map(([label, value]) => `
+    <div class="card">
+      <p class="stat-label">${label}</p>
+      <p class="stat-value">${value}</p>
+    </div>
+  `).join("");
+}
+
+function renderByAccountChart() {
+  const el = document.getElementById("byAccountChart");
+  const note = document.getElementById("byAccountNote");
+  if (!DATA.byAccount.length) {
+    note.textContent = "No amount column detected in the source data.";
+    return;
+  }
+  note.textContent = "";
+  const max = Math.max(...DATA.byAccount.map(r => r.total));
+  const mode = dark() ? "dark" : "light";
+  el.innerHTML = DATA.byAccount.map(r => {
+    const pct = max > 0 ? Math.max((r.total / max) * 100, 1) : 0;
+    const color = DATA.colors[r.account][mode];
+    return `
+      <div class="bar-row" data-account="${r.account}" data-count="${r.count}" data-total="${r.total}">
+        <div class="bar-label" title="${r.account}">${r.account}</div>
+        <div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:${color}"></div></div>
+        <div class="bar-value">${fmtMoney(r.total)}</div>
+      </div>
+    `;
+  }).join("");
+  el.querySelectorAll(".bar-row").forEach(row => {
+    row.addEventListener("mousemove", evt => {
+      showTooltip(evt, `${row.dataset.account}: ${fmtMoney(+row.dataset.total)} (${row.dataset.count} refund${row.dataset.count === "1" ? "" : "s"})`);
+    });
+    row.addEventListener("mouseleave", hideTooltip);
+  });
+}
+
+function renderByMonthChart() {
+  const el = document.getElementById("byMonthChart");
+  const axis = document.createElement("div");
+  axis.className = "month-axis";
+  const legendEl = document.getElementById("byMonthLegend");
+  if (!DATA.byMonth.length) {
+    el.innerHTML = '<p class="empty-note">No monthly breakdown available.</p>';
+    legendEl.innerHTML = "";
+    return;
+  }
+  const months = [...new Set(DATA.byMonth.map(r => r.month))].sort();
+  const totalsByMonth = {};
+  months.forEach(m => totalsByMonth[m] = 0);
+  DATA.byMonth.forEach(r => totalsByMonth[r.month] += r.total);
+  const max = Math.max(...Object.values(totalsByMonth), 1);
+  const mode = dark() ? "dark" : "light";
+
+  el.innerHTML = "";
+  const chart = document.createElement("div");
+  chart.className = "month-chart";
+  months.forEach(month => {
+    const col = document.createElement("div");
+    col.className = "month-col";
+    const segs = DATA.byMonth.filter(r => r.month === month);
+    segs.forEach(seg => {
+      const div = document.createElement("div");
+      div.className = "month-seg";
+      const heightPct = max > 0 ? (seg.total / max) * 100 : 0;
+      div.style.height = heightPct + "%";
+      div.style.background = DATA.colors[seg.account][mode];
+      div.addEventListener("mousemove", evt => {
+        showTooltip(evt, `${seg.account} – ${month}: ${fmtMoney(seg.total)} (${seg.count} refund${seg.count === 1 ? "" : "s"})`);
+      });
+      div.addEventListener("mouseleave", hideTooltip);
+      col.appendChild(div);
+    });
+    chart.appendChild(col);
+  });
+  el.appendChild(chart);
+
+  months.forEach(m => {
+    const span = document.createElement("span");
+    span.textContent = m;
+    axis.appendChild(span);
+  });
+  el.appendChild(axis);
+
+  if (DATA.accounts.length > 1) {
+    legendEl.innerHTML = DATA.accounts.map(a => `
+      <div class="legend-item">
+        <span class="legend-swatch" style="background:${DATA.colors[a][mode]}"></span>${a}
+      </div>
+    `).join("");
+  } else {
+    legendEl.innerHTML = "";
+  }
+}
+
+function polarToCartesian(cx, cy, r, angleDeg) {
+  const rad = angleDeg * Math.PI / 180;
+  return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
+}
+
+function donutSlicePath(cx, cy, rOuter, rInner, startDeg, endDeg) {
+  const startOuter = polarToCartesian(cx, cy, rOuter, startDeg);
+  const endOuter = polarToCartesian(cx, cy, rOuter, endDeg);
+  const startInner = polarToCartesian(cx, cy, rInner, endDeg);
+  const endInner = polarToCartesian(cx, cy, rInner, startDeg);
+  const largeArc = (endDeg - startDeg) > 180 ? 1 : 0;
+  return [
+    `M ${startOuter.x} ${startOuter.y}`,
+    `A ${rOuter} ${rOuter} 0 ${largeArc} 1 ${endOuter.x} ${endOuter.y}`,
+    `L ${startInner.x} ${startInner.y}`,
+    `A ${rInner} ${rInner} 0 ${largeArc} 0 ${endInner.x} ${endInner.y}`,
+    "Z",
+  ].join(" ");
+}
+
+function renderByFormChart() {
+  const el = document.getElementById("byFormChart");
+  const note = document.getElementById("byFormNote");
+  const legendEl = document.getElementById("byFormLegend");
+  if (!DATA.byForm.length) {
+    note.textContent = "No form breakdown available.";
+    el.innerHTML = "";
+    legendEl.innerHTML = "";
+    return;
+  }
+  note.textContent = "";
+  const mode = dark() ? "dark" : "light";
+  const total = DATA.byForm.reduce((s, r) => s + r.total, 0);
+  const size = 200, cx = size / 2, cy = size / 2, rOuter = 90, rInner = 55;
+  const gapDeg = total > 0 ? 1.5 : 0;
+  let angle = -90;
+
+  const svgNS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(svgNS, "svg");
+  svg.setAttribute("viewBox", `0 0 ${size} ${size}`);
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+
+  DATA.byForm.forEach(r => {
+    const frac = total > 0 ? r.total / total : 0;
+    const sweep = frac * 360;
+    const startA = angle + gapDeg / 2;
+    const endA = angle + Math.max(sweep - gapDeg, 0);
+    angle += sweep;
+    const path = document.createElementNS(svgNS, "path");
+    path.setAttribute("d", donutSlicePath(cx, cy, rOuter, rInner, startA, endA));
+    path.setAttribute("fill", DATA.formColors[r.category][mode]);
+    const pct = total > 0 ? Math.round((r.total / total) * 100) : 0;
+    path.addEventListener("mousemove", evt => {
+      showTooltip(evt, `${r.category}: ${fmtMoney(r.total)} (${pct}%, ${r.count} refund${r.count === 1 ? "" : "s"})`);
+    });
+    path.addEventListener("mouseleave", hideTooltip);
+    svg.appendChild(path);
+  });
+
+  const centerValue = document.createElementNS(svgNS, "text");
+  centerValue.setAttribute("x", cx);
+  centerValue.setAttribute("y", cy - 4);
+  centerValue.setAttribute("text-anchor", "middle");
+  centerValue.setAttribute("class", "donut-center-value");
+  centerValue.textContent = fmtMoney(total);
+  svg.appendChild(centerValue);
+
+  const centerLabel = document.createElementNS(svgNS, "text");
+  centerLabel.setAttribute("x", cx);
+  centerLabel.setAttribute("y", cy + 14);
+  centerLabel.setAttribute("text-anchor", "middle");
+  centerLabel.setAttribute("class", "donut-center-label");
+  centerLabel.textContent = "total";
+  svg.appendChild(centerLabel);
+
+  el.innerHTML = "";
+  el.appendChild(svg);
+
+  legendEl.innerHTML = DATA.byForm.map(r => {
+    const pct = total > 0 ? Math.round((r.total / total) * 100) : 0;
+    return `
+      <div class="legend-item">
+        <span class="legend-swatch" style="background:${DATA.formColors[r.category][mode]}"></span>${r.category} — ${fmtMoney(r.total)} (${pct}%)
+      </div>
+    `;
+  }).join("");
+}
+
+function renderTable() {
+  const note = document.getElementById("tableNote");
+  const t = DATA.table;
+  note.textContent = t.truncated
+    ? `Showing first ${fmtInt(t.rows.length)} of ${fmtInt(t.totalRows)} refunds. Narrow the date range to see the rest. Contains donor-level detail — handle accordingly.`
+    : `${fmtInt(t.totalRows)} refund${t.totalRows === 1 ? "" : "s"}. Contains donor-level detail — handle accordingly.`;
+
+  const head = document.getElementById("tableHead");
+  head.innerHTML = t.columns.map((c, i) => `<th data-col="${i}">${c}<span class="arrow"></span></th>`).join("");
+
+  const clientIdx = t.columns.indexOf("Client");
+  const clientFilter = document.getElementById("clientFilter");
+  clientFilter.innerHTML = '<option value="">All clients</option>' +
+    DATA.accounts.map(a => `<option value="${escapeHtml(a)}">${escapeHtml(a)}</option>`).join("");
+
+  const formIdx = t.columns.indexOf("Form");
+  const formFilter = document.getElementById("formFilter");
+  if (formIdx >= 0) {
+    const forms = [...new Set(t.rows.map(r => r[formIdx]).filter(v => v != null))].sort();
+    formFilter.innerHTML = '<option value="">All forms</option>' +
+      forms.map(f => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join("");
+  } else {
+    formFilter.style.display = "none";
+  }
+
+  // Filters by refund month (not contribution month) to match the "Refunds by month" chart above.
+  const monthIdx = t.columns.indexOf("Refund Date");
+  const monthFilter = document.getElementById("monthFilter");
+  if (monthIdx >= 0) {
+    const months = [...new Set(t.rows.map(r => r[monthIdx]).filter(v => v != null).map(v => String(v).slice(0, 7)))].sort();
+    monthFilter.innerHTML = '<option value="">All months</option>' +
+      months.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join("");
+  } else {
+    monthFilter.style.display = "none";
+  }
+
+  let sortCol = -1, sortDir = 1;
+  let rows = t.rows.slice();
+
+  function applyFilters() {
+    const client = clientFilter.value;
+    const form = formIdx >= 0 ? formFilter.value : "";
+    const month = monthIdx >= 0 ? monthFilter.value : "";
+    let filtered = t.rows;
+    if (client) filtered = filtered.filter(r => r[clientIdx] === client);
+    if (form) filtered = filtered.filter(r => r[formIdx] === form);
+    if (month) filtered = filtered.filter(r => r[monthIdx] != null && String(r[monthIdx]).slice(0, 7) === month);
+    rows = filtered;
+    if (sortCol >= 0) applySort(false);
+    else renderRows();
+  }
+
+  function applySort(toggle) {
+    if (toggle) sortDir = (sortCol === applySort.lastCol) ? -sortDir : 1;
+    applySort.lastCol = sortCol;
+    const numeric = t.columns[sortCol] === "Amount";
+    rows.sort((a, b) => {
+      const av = a[sortCol], bv = b[sortCol];
+      if (av == null) return 1;
+      if (bv == null) return -1;
+      if (numeric) return (av - bv) * sortDir;
+      return String(av).localeCompare(String(bv)) * sortDir;
+    });
+    renderRows();
+    head.querySelectorAll("th").forEach(th => th.querySelector(".arrow").textContent = "");
+    head.querySelector(`th[data-col="${sortCol}"] .arrow`).textContent = sortDir === 1 ? "↑" : "↓";
+  }
+
+  function renderRows() {
+    const body = document.getElementById("tableBody");
+    if (!rows.length) {
+      body.innerHTML = `<tr><td colspan="${t.columns.length}" class="empty-note">No matching refunds.</td></tr>`;
+      return;
+    }
+    body.innerHTML = rows.map(r => `<tr>${r.map((cell, i) =>
+      `<td>${cell == null ? "" : (t.columns[i] === "Amount" ? fmtMoney(cell) : escapeHtml(String(cell)))}</td>`
+    ).join("")}</tr>`).join("");
+  }
+
+  function escapeHtml(s) {
+    return s.replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  }
+
+  head.querySelectorAll("th").forEach(th => {
+    th.addEventListener("click", () => {
+      sortCol = +th.dataset.col;
+      applySort(true);
+    });
+  });
+  clientFilter.addEventListener("change", applyFilters);
+  if (formIdx >= 0) formFilter.addEventListener("change", applyFilters);
+  if (monthIdx >= 0) monthFilter.addEventListener("change", applyFilters);
+
+  // Default to most-recent-refund-first; a later click on any header re-sorts from there.
+  const refundDateIdx = t.columns.indexOf("Refund Date");
+  if (refundDateIdx >= 0) {
+    sortCol = refundDateIdx;
+    sortDir = -1;
+    applySort(false);
+  } else {
+    renderRows();
+  }
+}
+
+function renderAll() {
+  renderSubtitle();
+  renderStats();
+  renderByAccountChart();
+  renderByMonthChart();
+  renderByFormChart();
+}
+renderAll();
+renderTable();
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+  renderByAccountChart();
+  renderByMonthChart();
+  renderByFormChart();
+});
+</script>
+</body>
+</html>
+"""
