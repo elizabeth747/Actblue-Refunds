@@ -1,0 +1,8 @@
+# Copy this to accounts.yaml and list every ActBlue entity/committee to
+# pull refunds from. `key` must be unique and is used to look up that
+# account's API credentials as environment variables (see .env.example).
+accounts:
+  - key: campaign_a
+    name: "Campaign A for Congress"
+  - key: campaign_b
+    name: "Campaign B Committee"
